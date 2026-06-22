@@ -2,6 +2,7 @@ package store
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -433,5 +434,36 @@ func TestQueryLogEntriesPaginate(t *testing.T) {
 	}
 	if results[19].LineNumber != 70 {
 		t.Errorf("last entry LineNumber: want 70, got %d", results[19].LineNumber)
+	}
+}
+
+// TestOpenCreatesParentDirectories verifies that Open creates the parent
+// directories of the database path when they don't exist.
+// Without this, `run.sh ci dev` silently falls back to an in-memory database
+// because /var/lib/Wywy-Website/ci/ doesn't exist.
+func TestOpenCreatesParentDirectories(t *testing.T) {
+	// Use a path where the parent directory does not exist.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "nonexistent", "subdir", "ci.db")
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open should create parent directories, got error: %v", err)
+	}
+	defer s.Close()
+
+	// Verify the database file was actually created.
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Errorf("database file not created at %s: %v", dbPath, err)
+	}
+
+	// Verify the schema was applied (tables exist).
+	db := s.DB()
+	var tableCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tableCount); err != nil {
+		t.Fatalf("count tables: %v", err)
+	}
+	if tableCount != 3 {
+		t.Errorf("expected 3 tables, got %d", tableCount)
 	}
 }

@@ -11,22 +11,32 @@ import (
 
 // Broadcaster manages WebSocket subscriber channels per run.
 type Broadcaster struct {
-	mu      sync.RWMutex
-	streams map[string][]chan orchestrator.LogMessage
+	mu        sync.RWMutex
+	streams   map[string][]chan orchestrator.LogMessage
+	completed map[string]orchestrator.LogMessage // runID → completion message for late subscribers
 }
 
 // NewBroadcaster creates a new Broadcaster.
 func NewBroadcaster() *Broadcaster {
 	return &Broadcaster{
-		streams: make(map[string][]chan orchestrator.LogMessage),
+		streams:   make(map[string][]chan orchestrator.LogMessage),
+		completed: make(map[string]orchestrator.LogMessage),
 	}
 }
 
 // Subscribe adds a channel for the given run ID and returns it.
+// If the run has already completed, the channel receives the "done" message
+// immediately and is closed.
 func (b *Broadcaster) Subscribe(runID string) chan orchestrator.LogMessage {
 	ch := make(chan orchestrator.LogMessage, 64)
 	b.mu.Lock()
-	b.streams[runID] = append(b.streams[runID], ch)
+	if msg, ok := b.completed[runID]; ok {
+		// Run already finished — deliver completion message straight away.
+		ch <- msg
+		close(ch)
+	} else {
+		b.streams[runID] = append(b.streams[runID], ch)
+	}
 	b.mu.Unlock()
 	return ch
 }
@@ -46,7 +56,8 @@ func (b *Broadcaster) Unsubscribe(runID string, ch chan orchestrator.LogMessage)
 }
 
 // Done sends a completion message to all subscribers of the given run and
-// closes their channels.
+// closes their channels. The run is marked as completed so that any future
+// subscriber immediately receives the "done" message.
 func (b *Broadcaster) Done(runID string, status string) {
 	msg := orchestrator.LogMessage{
 		Type:   "done",
@@ -54,6 +65,7 @@ func (b *Broadcaster) Done(runID string, status string) {
 		Status: status,
 	}
 	b.mu.Lock()
+	b.completed[runID] = msg
 	for _, ch := range b.streams[runID] {
 		select {
 		case ch <- msg:
@@ -91,7 +103,7 @@ func (h *Handler) handleRunStream(w http.ResponseWriter, r *http.Request) {
 	ch := h.Broadcaster.Subscribe(runID)
 	defer h.Broadcaster.Unsubscribe(runID, ch)
 
-	c, err := websocket.Accept(w, r, nil)
+	c, err := websocket.Accept(w, r, defaultAcceptOptions)
 	if err != nil {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"wywy-website/ci/server/api"
 	"wywy-website/ci/server/orchestrator"
@@ -18,13 +19,9 @@ func main() {
 		dbPath = "/var/lib/Wywy-Website/ci/ci.db"
 	}
 
-	st, err := store.Open(dbPath)
+	st, err := openStore(dbPath)
 	if err != nil {
-		// Fall back to in-memory for development.
-		st, err = store.Open(":memory:")
-		if err != nil {
-			log.Fatalf("failed to open store: %v", err)
-		}
+		log.Fatalf("failed to open store at %s: %v", dbPath, err)
 	}
 	defer st.Close()
 
@@ -34,20 +31,28 @@ func main() {
 		servicesPath = "/etc/Wywy-Website-Control/services.txt"
 	}
 
-	validServices := loadServices(servicesPath)
+	validServices, serviceRepoMap := loadServices(servicesPath)
 
-	// Create broadcaster, runner, and handler.
+	// Create broadcasters, runner, and handler.
 	broadcaster := api.NewBroadcaster()
+	eventBroadcaster := api.NewEventBroadcaster()
 	runner := orchestrator.NewRunner(st, orchestrator.DefaultRunner)
 	runner.SetBroadcaster(broadcaster)
-	runner.LogsDir = "/var/log/Wywy-Website/ci/runs"
+	runner.SetEventBroadcaster(api.NewEventBroadcasterAdapter(eventBroadcaster))
+	runner.RunsDir = "/var/lib/Wywy-Website/ci/runs"
+	if serviceRepoMap != nil {
+		runner.SetResolver(orchestrator.NewServiceScriptResolver(
+			serviceRepoMap, "/usr/local/Wywy-Website",
+		))
+	}
 
 	handler := &api.Handler{
-		Store:         st,
-		Runner:        runner,
-		ValidServices: validServices,
-		ServicesPath:  servicesPath,
-		Broadcaster:   broadcaster,
+		Store:            st,
+		Runner:           runner,
+		ValidServices:    validServices,
+		ServicesPath:     servicesPath,
+		Broadcaster:      broadcaster,
+		EventBroadcaster: eventBroadcaster,
 	}
 
 	// Register routes and wrap with CORS.
@@ -62,42 +67,33 @@ func main() {
 	}
 }
 
-// loadServices reads the services.txt file and returns a set of valid service names.
-// If the file cannot be read, it returns nil (skip validation).
-func loadServices(path string) map[string]bool {
+// openStore opens the SQLite store at the given path.
+// It does NOT fall back to :memory: — callers must handle the error.
+func openStore(path string) (*store.Store, error) {
+	return store.Open(path)
+}
+
+// loadServices reads the services.txt file (name,repo format) and returns
+// a set of valid service names and a map of service name → repo name.
+// If the file cannot be read, both return values are nil (skip validation).
+func loadServices(path string) (map[string]bool, map[string]string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	services := make(map[string]bool)
-	for _, line := range splitLines(string(data)) {
-		if line != "" {
-			services[line] = true
+	repos := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ",", 2)
+		name := parts[0]
+		services[name] = true
+		if len(parts) > 1 {
+			repos[name] = parts[1]
 		}
 	}
-	return services
-}
-
-// splitLines splits a string by newlines and trims whitespace from each line.
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			line := s[start:i]
-			if line != "" {
-				lines = append(lines, line)
-			}
-			start = i + 1
-		}
-	}
-	// Handle last line without trailing newline.
-	if start < len(s) {
-		line := s[start:]
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
+	return services, repos
 }

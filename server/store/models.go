@@ -81,13 +81,13 @@ func scanRun(s scanner) (*Run, error) {
 
 // RunService represents a single service's test execution within a run.
 type RunService struct {
-	RunID       string
-	ServiceName string
-	Suite       string
-	Status      string
-	ExitCode    *int
-	StartTime   string
-	EndTime     string
+	RunID       string `json:"run_id"`
+	ServiceName string `json:"service_name"`
+	Suite       string `json:"suite"`
+	Status      string `json:"status"`
+	ExitCode    *int   `json:"exit_code"`
+	StartTime   string `json:"start_time"`
+	EndTime     string `json:"end_time"`
 }
 
 // CreateRunService inserts a new run_service record.
@@ -120,6 +120,59 @@ func (s *Store) GetRunService(runID, serviceName string) (*RunService, error) {
 		return nil, fmt.Errorf("get run_service: %w", err)
 	}
 	return rs, nil
+}
+
+// ListActiveRunServices returns distinct service names from runs with status "running".
+func (s *Store) ListActiveRunServices() ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT rs.service_name
+		 FROM runs r
+		 JOIN run_services rs ON r.id = rs.run_id
+		 WHERE r.status = 'running'`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list active run_services: %w", err)
+	}
+	defer rows.Close()
+
+	var services []string
+	for rows.Next() {
+		var svc string
+		if err := rows.Scan(&svc); err != nil {
+			return nil, fmt.Errorf("scan active service: %w", err)
+		}
+		services = append(services, svc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return services, nil
+}
+
+// ListRunServices returns all run_service records for a given run.
+func (s *Store) ListRunServices(runID string) ([]RunService, error) {
+	rows, err := s.db.Query(
+		`SELECT run_id, service_name, suite, status, exit_code, start_time, end_time
+		 FROM run_services WHERE run_id = ?`,
+		runID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list run_services: %w", err)
+	}
+	defer rows.Close()
+
+	var svcs []RunService
+	for rows.Next() {
+		rs, err := scanRunService(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan run_service: %w", err)
+		}
+		svcs = append(svcs, *rs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return svcs, nil
 }
 
 // UpdateRunStatus updates the status and finished_at of a run.
@@ -207,6 +260,53 @@ func (s *Store) QueryLogEntries(runID, serviceName string, opts LogQueryOpts) ([
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query log entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []LogEntry
+	for rows.Next() {
+		var e LogEntry
+		if err := rows.Scan(&e.RunID, &e.ServiceName, &e.LineNumber, &e.Timestamp, &e.Level, &e.Content); err != nil {
+			return nil, fmt.Errorf("scan log entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return entries, nil
+}
+
+// QueryAllLogEntries returns log entries for a run across all services.
+func (s *Store) QueryAllLogEntries(runID string, opts LogQueryOpts) ([]LogEntry, error) {
+	query := `SELECT run_id, service_name, line_number, timestamp, level, content
+		 FROM log_entries WHERE run_id = ?`
+	args := []any{runID}
+
+	if opts.Level != "" {
+		query += ` AND level = ?`
+		args = append(args, opts.Level)
+	}
+
+	if opts.Search != "" {
+		query += ` AND content LIKE ?`
+		args = append(args, "%"+opts.Search+"%")
+	}
+
+	query += ` ORDER BY line_number`
+
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	if opts.Offset > 0 {
+		query += ` OFFSET ?`
+		args = append(args, opts.Offset)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query all log entries: %w", err)
 	}
 	defer rows.Close()
 

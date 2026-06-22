@@ -6,10 +6,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
-	"wywy-website/ci/server/orchestrator"
+	"time"
 
+	"wywy-website/ci/server/orchestrator"
 	"wywy-website/ci/server/store"
+
+	"github.com/coder/websocket"
 )
 
 // fakeRunner returns a fixed exit code and output for API tests.
@@ -20,6 +28,18 @@ type fakeRunner struct {
 
 func (f *fakeRunner) Run(ctx context.Context, name string, args ...string) (int, string, error) {
 	return f.exitCode, f.output, nil
+}
+
+func (f *fakeRunner) StartDetached(ctx context.Context, outputDir, name string, args ...string) (*exec.Cmd, error) {
+	os.MkdirAll(outputDir, 0755)
+	os.WriteFile(filepath.Join(outputDir, "stdout.log"), []byte("script ran\n"), 0644)
+	os.WriteFile(filepath.Join(outputDir, "stderr.log"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(outputDir, "results.jsonl"), []byte(`{"name":"t1","status":"passed"}`+"\n"), 0644)
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Start()
+	return cmd, nil
 }
 
 func TestListRunsEmpty(t *testing.T) {
@@ -64,8 +84,8 @@ func TestCreateRun(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("status: want 201, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status: want 202, got %d", resp.StatusCode)
 	}
 
 	ct := resp.Header.Get("Content-Type")
@@ -156,6 +176,69 @@ func TestGetRunFound(t *testing.T) {
 	}
 	if ca, ok := result["created_at"]; !ok || ca == "" {
 		t.Error("missing 'created_at'")
+	}
+}
+
+func TestGetRunReturnsServicesWithExitCode(t *testing.T) {
+	s := newTestStore(t)
+
+	run := &store.Run{
+		ID: "r-exit", CreatedAt: "2026-01-01T00:00:00Z", Status: "failed",
+	}
+	if err := s.CreateRun(run); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	exitCode := 42
+	rs := &store.RunService{
+		RunID: "r-exit", ServiceName: "ci", Suite: "test",
+		Status: "failed", ExitCode: &exitCode,
+		EndTime: "2026-01-01T00:01:00Z",
+	}
+	if err := s.CreateRunService(rs); err != nil {
+		t.Fatalf("CreateRunService: %v", err)
+	}
+
+	srv := newTestServer(t, s, nil, nil)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/runs/r-exit")
+	if err != nil {
+		t.Fatalf("GET /api/runs/r-exit: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: want 200, got %d", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type: want application/json, got %q", ct)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	// The response MUST include the services array with exit_code.
+	services, ok := result["services"].([]any)
+	if !ok {
+		t.Fatal("response missing 'services' array — exit codes are not exposed to the frontend")
+	}
+	if len(services) == 0 {
+		t.Fatal("expected at least one service in 'services' array")
+	}
+
+	svc := services[0].(map[string]any)
+
+	if name, ok := svc["service_name"]; !ok || name != "ci" {
+		t.Errorf("service_name: want ci, got %v", name)
+	}
+	gotExitCode, ok := svc["exit_code"].(float64)
+	if !ok || int(gotExitCode) != 42 {
+		t.Errorf("exit_code: want 42, got %v", svc["exit_code"])
 	}
 }
 
@@ -335,6 +418,237 @@ func TestGetRunLogsFiltered(t *testing.T) {
 	}
 }
 
+func TestGetRunLogsAllServices(t *testing.T) {
+	s := newTestStore(t)
+
+	run := &store.Run{
+		ID: "r1", CreatedAt: "2026-01-01T00:00:00Z", Status: "passed",
+	}
+	if err := s.CreateRun(run); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	entries := []store.LogEntry{
+		{RunID: "r1", ServiceName: "agentic", LineNumber: 0, Content: "log from agentic"},
+		{RunID: "r1", ServiceName: "ci", LineNumber: 1, Content: "log from ci"},
+	}
+	if err := s.InsertLogEntries(entries); err != nil {
+		t.Fatalf("InsertLogEntries: %v", err)
+	}
+
+	srv := newTestServer(t, s, nil, nil)
+	defer srv.Close()
+
+	// No service name — endpoint should return logs from all services.
+	resp, err := http.Get(srv.URL + "/api/runs/r1/logs")
+	if err != nil {
+		t.Fatalf("GET /api/runs/r1/logs: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", resp.StatusCode)
+	}
+
+	var result []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(result) != 2 {
+		t.Fatalf("want 2 log entries (both services), got %d", len(result))
+	}
+
+	// Both services must be represented.
+	services := make(map[string]bool)
+	for _, entry := range result {
+		services[entry["service_name"].(string)] = true
+	}
+	if !services["agentic"] {
+		t.Error("missing log from service 'agentic'")
+	}
+	if !services["ci"] {
+		t.Error("missing log from service 'ci'")
+	}
+}
+
+func TestListActiveRuns(t *testing.T) {
+	s := newTestStore(t)
+
+	// Run 1: running with service "agentic".
+	run1 := &store.Run{
+		ID: "run-active", CreatedAt: "2026-06-01T00:00:00Z", Status: "running",
+	}
+	if err := s.CreateRun(run1); err != nil {
+		t.Fatalf("CreateRun(run1): %v", err)
+	}
+	if err := s.CreateRunService(&store.RunService{
+		RunID: "run-active", ServiceName: "agentic", Suite: "test", Status: "running",
+	}); err != nil {
+		t.Fatalf("CreateRunService(agentic): %v", err)
+	}
+
+	// Run 2: completed, service "ci" is not active.
+	run2 := &store.Run{
+		ID: "run-done", CreatedAt: "2026-06-01T00:01:00Z", Status: "passed",
+	}
+	if err := s.CreateRun(run2); err != nil {
+		t.Fatalf("CreateRun(run2): %v", err)
+	}
+	if err := s.CreateRunService(&store.RunService{
+		RunID: "run-done", ServiceName: "ci", Suite: "test", Status: "passed",
+	}); err != nil {
+		t.Fatalf("CreateRunService(ci): %v", err)
+	}
+
+	srv := newTestServer(t, s, nil, nil)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/runs/active")
+	if err != nil {
+		t.Fatalf("GET /api/runs/active: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: want 200, got %d", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type: want application/json, got %q", ct)
+	}
+
+	var result map[string]map[string]bool
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	active, ok := result["active_services"]
+	if !ok {
+		t.Fatal("response missing 'active_services'")
+	}
+
+	if !active["agentic"] {
+		t.Error("agentic should be active (running)")
+	}
+	if active["ci"] {
+		t.Error("ci should NOT be active (completed)")
+	}
+}
+
+func TestCreateRunEmitsRunStartedEvent(t *testing.T) {
+	srv, conn, ctx, cancel := setupEventTest(t)
+	defer cancel()
+	defer srv.Close()
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// POST to create a run.
+	body := bytes.NewBufferString(`{"services":["agentic"],"suite":"test"}`)
+	resp, err := http.Post(srv.URL+"/api/runs", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST /api/runs: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status: want 202, got %d", resp.StatusCode)
+	}
+
+	// Read the run_started event from the WebSocket.
+	_, msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("WebSocket read: %v", err)
+	}
+
+	var received RunEvent
+	if err := json.Unmarshal(msg, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if received.Type != "run_started" {
+		t.Errorf("Type: want %q, got %q", "run_started", received.Type)
+	}
+	if received.ServiceName != "agentic" {
+		t.Errorf("ServiceName: want %q, got %q", "agentic", received.ServiceName)
+	}
+	if received.Status != "running" {
+		t.Errorf("Status: want %q, got %q", "running", received.Status)
+	}
+}
+
+// TestCreateRunEmitsFullLifecycleEvents verifies that both run_started and
+// run_finished events are emitted via WebSocket when a run is created.
+func TestCreateRunEmitsFullLifecycleEvents(t *testing.T) {
+	srv, conn, ctx, cancel := setupEventTest(t)
+	defer cancel()
+	defer srv.Close()
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// POST to create a run.
+	body := bytes.NewBufferString(`{"services":["agentic"],"suite":"test"}`)
+	resp, err := http.Post(srv.URL+"/api/runs", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST /api/runs: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status: want 202, got %d", resp.StatusCode)
+	}
+
+	// Read the run_started event from the WebSocket.
+	_, msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("WebSocket read run_started: %v", err)
+	}
+
+	var started RunEvent
+	if err := json.Unmarshal(msg, &started); err != nil {
+		t.Fatalf("unmarshal run_started: %v", err)
+	}
+
+	if started.Type != "run_started" {
+		t.Errorf("started Type: want %q, got %q", "run_started", started.Type)
+	}
+	if started.ServiceName != "agentic" {
+		t.Errorf("started ServiceName: want %q, got %q", "agentic", started.ServiceName)
+	}
+	if started.Status != "running" {
+		t.Errorf("started Status: want %q, got %q", "running", started.Status)
+	}
+	if started.RunID == "" {
+		t.Error("started RunID: expected non-empty")
+	}
+
+	// Read the run_finished event from the WebSocket.
+	_, msg, err = conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("WebSocket read run_finished: %v", err)
+	}
+
+	var finished RunEvent
+	if err := json.Unmarshal(msg, &finished); err != nil {
+		t.Fatalf("unmarshal run_finished: %v", err)
+	}
+
+	if finished.Type != "run_finished" {
+		t.Errorf("finished Type: want %q, got %q", "run_finished", finished.Type)
+	}
+	if finished.ServiceName != "agentic" {
+		t.Errorf("finished ServiceName: want %q, got %q", "agentic", finished.ServiceName)
+	}
+	if finished.Status != "passed" {
+		t.Errorf("finished Status: want %q, got %q", "passed", finished.Status)
+	}
+	if finished.RunID == "" {
+		t.Error("finished RunID: expected non-empty")
+	}
+	if finished.RunID != started.RunID {
+		t.Error("finished RunID does not match started RunID")
+	}
+}
+
 // newTestServer creates an httptest.Server with the given store and runner.
 func newTestServer(t *testing.T, st *store.Store, runner *orchestrator.Runner, validServices map[string]bool) *httptest.Server {
 	t.Helper()
@@ -342,6 +656,27 @@ func newTestServer(t *testing.T, st *store.Store, runner *orchestrator.Runner, v
 	h := &Handler{Store: st, Runner: runner, ValidServices: validServices}
 	h.RegisterRoutes(mux)
 	return httptest.NewServer(mux)
+}
+
+// buildServiceRepoMap reads services.txt (name,repo format) and returns a
+// map of service name → repo name, borrowing the same source as main.go.
+// Returns nil if the file cannot be read.
+func buildServiceRepoMap(path string) map[string]string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	repos := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ",", 2)
+		if len(parts) > 1 {
+			repos[parts[0]] = parts[1]
+		}
+	}
+	return repos
 }
 
 // newTestStore opens an in-memory store for API tests.
@@ -353,4 +688,45 @@ func newTestStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// setupEventTest creates a test server with EventBroadcaster wired to both the
+// Handler (for the WebSocket endpoint) and the Runner (for publishing events),
+// and returns a connected WebSocket client. Caller is responsible for
+// closing/cleanup of all return values.
+func setupEventTest(t *testing.T) (srv *httptest.Server, conn *websocket.Conn, ctx context.Context, cancel context.CancelFunc) {
+	t.Helper()
+	st := newTestStore(t)
+	eb := NewEventBroadcaster()
+
+	// Borrow the production runner configuration: read services.txt
+	// to build the resolver, set RunsDir.
+	repos := buildServiceRepoMap("/etc/Wywy-Website-Control/services.txt")
+	runner := orchestrator.NewRunner(st, &fakeRunner{exitCode: 0, output: "ok"})
+	runner.SetEventBroadcaster(&eventBroadcasterAdapter{inner: eb})
+	runner.RunsDir = t.TempDir()
+	if repos != nil {
+		runner.SetResolver(orchestrator.NewServiceScriptResolver(repos, "/usr/local/Wywy-Website"))
+	}
+
+	mux := http.NewServeMux()
+	h := &Handler{
+		Store:            st,
+		Runner:           runner,
+		EventBroadcaster: eb,
+	}
+	h.RegisterRoutes(mux)
+	srv = httptest.NewServer(mux)
+
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+
+	u := "ws" + srv.URL[4:] + "/api/events"
+	conn, _, err := websocket.Dial(ctx, u, nil)
+	if err != nil {
+		cancel()
+		srv.Close()
+		t.Fatalf("WebSocket dial: %v", err)
+	}
+
+	return srv, conn, ctx, cancel
 }

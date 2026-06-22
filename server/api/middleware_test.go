@@ -124,8 +124,8 @@ func TestCORSPassthroughForAPIEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/runs: %v", err)
 	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("POST /api/runs status: want 201, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("POST /api/runs status: want 202, got %d", resp.StatusCode)
 	}
 	got = resp.Header.Get("Access-Control-Allow-Origin")
 	if got != "*" {

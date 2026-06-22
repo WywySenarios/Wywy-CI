@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"wywy-website/ci/server/log"
 
 	"wywy-website/ci/server/store"
 )
@@ -30,18 +29,44 @@ type LogBroadcaster interface {
 	Done(runID string, status string)
 }
 
+// LifecycleEvent represents a run lifecycle event for external broadcast.
+type LifecycleEvent struct {
+	Type        string // "run_started" | "run_finished"
+	RunID       string
+	ServiceName string
+	Status      string
+	Timestamp   string
+}
+
+// EventBroadcaster publishes lifecycle events (nil-able, like LogBroadcaster).
+type EventBroadcaster interface {
+	Publish(event LifecycleEvent)
+}
+
 // Runner orchestrates test runs against the store.
 type Runner struct {
-	store         *store.Store
-	cmd           CommandRunner
-	validServices map[string]bool // nil = skip validation
-	broadcaster   LogBroadcaster  // nil = skip broadcasting
-	LogsDir       string          // directory for raw log files; empty = skip file writing
+	store            *store.Store
+	cmd              CommandRunner
+	validServices    map[string]bool        // nil = skip validation
+	broadcaster      LogBroadcaster         // nil = skip broadcasting
+	eventBroadcaster EventBroadcaster       // nil = skip event broadcasting
+	RunsDir          string                 // base directory for run output (stdout.log, stderr.log, results.jsonl)
+	resolver         *ServiceScriptResolver // script resolution; nil = skip detached execution
 }
 
 // SetBroadcaster configures a broadcaster for streaming log output.
 func (r *Runner) SetBroadcaster(b LogBroadcaster) {
 	r.broadcaster = b
+}
+
+// SetEventBroadcaster configures an event broadcaster for lifecycle events.
+func (r *Runner) SetEventBroadcaster(eb EventBroadcaster) {
+	r.eventBroadcaster = eb
+}
+
+// SetResolver configures the script resolver for detached script execution.
+func (r *Runner) SetResolver(resolver *ServiceScriptResolver) {
+	r.resolver = resolver
 }
 
 // NewRunner creates a new Runner.
@@ -58,20 +83,6 @@ func NewRunnerWithServices(s *store.Store, cmd CommandRunner, validServices map[
 // timestamp returns the current UTC time in RFC3339 format.
 func timestamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
-}
-
-// writeRawLog writes the raw command output to {LogsDir}/{runID}/{serviceName}.log.
-// LogsDir empty or output empty → no-op. Errors are non-fatal.
-func (r *Runner) writeRawLog(runID, serviceName, output string) {
-	if r.LogsDir == "" || output == "" {
-		return
-	}
-	runDir := filepath.Join(r.LogsDir, runID)
-	if err := os.MkdirAll(runDir, 0755); err != nil {
-		return
-	}
-	logPath := filepath.Join(runDir, serviceName+".log")
-	_ = os.WriteFile(logPath, []byte(output), 0644)
 }
 
 // StartRun starts a test run for the given services and suite.
@@ -105,13 +116,167 @@ func (r *Runner) StartRun(ctx context.Context, services []string, suite string) 
 		if err := r.store.CreateRunService(rs); err != nil {
 			return nil, fmt.Errorf("create run_service %s: %w", svc, err)
 		}
+
+		if r.eventBroadcaster != nil {
+			r.eventBroadcaster.Publish(LifecycleEvent{
+				Type:        "run_started",
+				RunID:       runID,
+				ServiceName: svc,
+				Status:      "running",
+				Timestamp:   timestamp(),
+			})
+		}
 	}
 
-	go r.executeServices(ctx, runID, services)
+	go r.executeServices(ctx, runID, suite, services)
 	return run, nil
 }
 
-func (r *Runner) executeServices(ctx context.Context, runID string, services []string) {
+// executeDetached resolves the script path, spawns it detached, monitors for
+// results.jsonl, and returns (exitCode, status) based on the parsed results.
+func (r *Runner) executeDetached(ctx context.Context, dr DetachedCommandRunner, runID, serviceName, suite string) (int, string) {
+	scriptPath, err := r.resolver.ResolveScriptPath(serviceName, suite)
+	if err != nil {
+		return 1, "failed"
+	}
+
+	outputDir := filepath.Join(r.RunsDir, runID, serviceName)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return 1, "failed"
+	}
+
+	args := BuildScriptArgs(ScriptInvocation{
+		RunID:     runID,
+		OutputDir: outputDir,
+	})
+
+	if _, err := dr.StartDetached(ctx, outputDir, scriptPath, args...); err != nil {
+		return 1, "failed"
+	}
+
+	results, stdout, stderr, err := MonitorScriptOutput(ctx, outputDir, 30*time.Minute)
+	if err != nil {
+		if ctx.Err() != nil {
+			return -1, "cancelled"
+		}
+		return 1, "failed"
+	}
+
+	// Persist captured stdout/stderr as log entries.
+	if stdout != "" || stderr != "" {
+		r.storeScriptOutput(runID, serviceName, stdout, stderr)
+	}
+
+	// Any non-passed result → service failed.
+	for _, res := range results {
+		if res.Status != "passed" {
+			return 1, "failed"
+		}
+	}
+	return 0, "passed"
+}
+
+// storeScriptOutput splits captured stdout/stderr into log entries and persists them.
+func (r *Runner) storeScriptOutput(runID, serviceName, stdout, stderr string) {
+	now := timestamp()
+	var entries []store.LogEntry
+	lineNum := 0
+
+	for _, line := range strings.Split(stdout, "\n") {
+		lineNum++
+		if line == "" {
+			continue
+		}
+		entries = append(entries, store.LogEntry{
+			RunID:       runID,
+			ServiceName: serviceName,
+			LineNumber:  lineNum,
+			Timestamp:   now,
+			Level:       "RAW",
+			Content:     line,
+		})
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		lineNum++
+		if line == "" {
+			continue
+		}
+		entries = append(entries, store.LogEntry{
+			RunID:       runID,
+			ServiceName: serviceName,
+			LineNumber:  lineNum,
+			Timestamp:   now,
+			Level:       "RAW",
+			Content:     line,
+		})
+	}
+
+	if len(entries) > 0 {
+		_ = r.store.InsertLogEntries(entries)
+	}
+}
+
+// DetectOrphanedRuns finds runs stuck in "running" status (e.g., after server restart)
+// and marks them as "failed" when no output files exist, or updates their status based
+// on existing results.jsonl files.
+func (r *Runner) DetectOrphanedRuns() {
+	runs, err := r.store.ListRuns()
+	if err != nil {
+		return
+	}
+
+	for _, run := range runs {
+		if run.Status != "running" {
+			continue
+		}
+
+		services, err := r.store.ListRunServices(run.ID)
+		if err != nil || len(services) == 0 {
+			// No services to recover — just mark the run as failed.
+			r.store.UpdateRunStatus(run.ID, "failed", timestamp())
+			continue
+		}
+
+		allPassed := true
+		for _, svc := range services {
+			resultsPath := filepath.Join(r.RunsDir, run.ID, svc.ServiceName, "results.jsonl")
+
+			if _, err := os.Stat(resultsPath); err == nil {
+				entries, parseErr := store.ParseResultsJSONL(resultsPath)
+				if parseErr != nil {
+					r.store.UpdateRunService(run.ID, svc.ServiceName, 1, "failed", timestamp())
+					allPassed = false
+					continue
+				}
+				svcPassed := true
+				for _, e := range entries {
+					if e.Status != "passed" {
+						svcPassed = false
+						break
+					}
+				}
+				if svcPassed {
+					r.store.UpdateRunService(run.ID, svc.ServiceName, 0, "passed", timestamp())
+				} else {
+					r.store.UpdateRunService(run.ID, svc.ServiceName, 1, "failed", timestamp())
+					allPassed = false
+				}
+			} else {
+				// No output — orphaned before completion.
+				r.store.UpdateRunService(run.ID, svc.ServiceName, 1, "failed", timestamp())
+				allPassed = false
+			}
+		}
+
+		if allPassed {
+			r.store.UpdateRunStatus(run.ID, "passed", timestamp())
+		} else {
+			r.store.UpdateRunStatus(run.ID, "failed", timestamp())
+		}
+	}
+}
+
+func (r *Runner) executeServices(ctx context.Context, runID string, suite string, services []string) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	overallPassed := true
@@ -122,54 +287,47 @@ func (r *Runner) executeServices(ctx context.Context, runID string, services []s
 		go func(serviceName string) {
 			defer wg.Done()
 
-			code, output, err := r.cmd.Run(ctx, "sh", "-c", fmt.Sprintf("echo 'test output for %s'", serviceName))
-			endTime := timestamp()
+			var code int
+			var status string
 
-			r.writeRawLog(runID, serviceName, output)
-
-			status := "passed"
-			if ctx.Err() != nil {
-				status = "cancelled"
-				mu.Lock()
-				cancelled = true
-				overallPassed = false
-				mu.Unlock()
-			} else if err != nil || code != 0 {
+			if dr, ok := r.cmd.(DetachedCommandRunner); ok && r.RunsDir != "" && r.resolver != nil {
+				// Detached execution path: resolve script, spawn, monitor, parse results.
+				code, status = r.executeDetached(ctx, dr, runID, serviceName, suite)
+			}
+			if status == "" {
+				code = 1
 				status = "failed"
-				mu.Lock()
-				overallPassed = false
-				mu.Unlock()
+				msg := fmt.Sprintf("Run failed: no execution path configured for service %q. "+
+					"Set a resolver and RunsDir on the Runner.", serviceName)
+				_ = r.store.InsertLogEntries([]store.LogEntry{{
+					RunID:       runID,
+					ServiceName: serviceName,
+					LineNumber:  0,
+					Timestamp:   timestamp(),
+					Level:       "ERROR",
+					Content:     msg,
+				}})
 			}
 
-			// Parse and persist log output.
-			if output != "" {
-				if parsed, parseErr := logpkg.ParseFile(strings.NewReader(output), runID, serviceName); parseErr == nil && len(parsed) > 0 {
-					entries := make([]store.LogEntry, len(parsed))
-					for i, e := range parsed {
-						entries[i] = store.LogEntry{
-							RunID:       runID,
-							ServiceName: e.ServiceName,
-							LineNumber:  e.LineNumber,
-							Timestamp:   e.Timestamp,
-							Level:       e.Level,
-							Content:     e.Content,
-						}
-						// Broadcast each parsed entry to WebSocket clients.
-						if r.broadcaster != nil {
-							r.broadcaster.Send(runID, LogMessage{
-								Type:        "log",
-								RunID:       runID,
-								ServiceName: e.ServiceName,
-								Level:       e.Level,
-								Content:     e.Content,
-							})
-						}
-					}
-					if storeErr := r.store.InsertLogEntries(entries); storeErr != nil {
-						// Non-fatal: run result is already determined, log capture failure
-						// should not change the run outcome.
-					}
-				}
+			endTime := timestamp()
+			mu.Lock()
+			switch status {
+			case "cancelled":
+				cancelled = true
+				overallPassed = false
+			case "failed":
+				overallPassed = false
+			}
+			mu.Unlock()
+
+			if r.eventBroadcaster != nil {
+				r.eventBroadcaster.Publish(LifecycleEvent{
+					Type:        "run_finished",
+					RunID:       runID,
+					ServiceName: serviceName,
+					Status:      status,
+					Timestamp:   endTime,
+				})
 			}
 
 			r.store.UpdateRunService(runID, serviceName, code, status, endTime)

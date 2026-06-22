@@ -196,3 +196,49 @@ func TestWebSocketCompletion(t *testing.T) {
 		t.Error("expected connection close after done message, but read succeeded")
 	}
 }
+
+func TestRunStreamClientConnectsAfterDone(t *testing.T) {
+	s := newTestStore(t)
+	b := NewBroadcaster()
+
+	// Call Done before any client connects — simulates a run that already finished.
+	b.Done("r1", "passed")
+
+	mux := http.NewServeMux()
+	h := &Handler{
+		Store:       s,
+		Broadcaster: b,
+	}
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	u := "ws" + srv.URL[4:] + "/api/runs/r1/stream"
+	conn, _, err := websocket.Dial(ctx, u, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// Should receive a "done" message because the run already completed.
+	_, msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read message after Done: %v", err)
+	}
+	var received orchestrator.LogMessage
+	if err := json.Unmarshal(msg, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if received.Type != "done" {
+		t.Errorf("type: want %q, got %q", "done", received.Type)
+	}
+	if received.RunID != "r1" {
+		t.Errorf("run_id: want %q, got %q", "r1", received.RunID)
+	}
+	if received.Status != "passed" {
+		t.Errorf("status: want %q, got %q", "passed", received.Status)
+	}
+}

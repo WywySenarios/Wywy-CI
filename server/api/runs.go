@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -30,11 +31,12 @@ func toSlice[T any](s []T) []T {
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	Store         *store.Store
-	Runner        *orchestrator.Runner
-	ValidServices map[string]bool // nil = skip validation
-	ServicesPath  string          // path to services.txt, empty means not configured
-	Broadcaster   *Broadcaster
+	Store            *store.Store
+	Runner           *orchestrator.Runner
+	ValidServices    map[string]bool // nil = skip validation
+	ServicesPath     string          // path to services.txt, empty means not configured
+	Broadcaster      *Broadcaster
+	EventBroadcaster *EventBroadcaster
 }
 
 // RegisterRoutes registers API routes on the given mux.
@@ -42,9 +44,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/runs", h.handleListRuns)
 	mux.HandleFunc("GET /api/runs/{id}", h.handleGetRun)
 	mux.HandleFunc("GET /api/runs/{id}/logs/{service}", h.handleGetRunLogs)
+	mux.HandleFunc("GET /api/runs/{id}/logs", h.handleGetRunLogsAll)
 	mux.HandleFunc("POST /api/runs", h.handleCreateRun)
 	mux.HandleFunc("GET /api/services", h.handleListServices)
 	mux.HandleFunc("GET /api/runs/{id}/stream", h.handleRunStream)
+	mux.HandleFunc("GET /api/events", h.handleEvents)
+	mux.HandleFunc("GET /api/runs/active", h.handleListActiveRuns)
 }
 
 // Service represents a monitored service from services.txt.
@@ -94,6 +99,29 @@ func (h *Handler) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, toSlice(runs))
 }
 
+func (h *Handler) handleListActiveRuns(w http.ResponseWriter, r *http.Request) {
+	services, err := h.Store.ListActiveRunServices()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	active := make(map[string]bool)
+	for _, svc := range services {
+		active[svc] = true
+	}
+
+	respondJSON(w, http.StatusOK, map[string]map[string]bool{
+		"active_services": active,
+	})
+}
+
+// runDetailResponse wraps a Run with its services for the GET /api/runs/{id} response.
+type runDetailResponse struct {
+	*store.Run
+	Services []store.RunService `json:"services"`
+}
+
 func (h *Handler) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	run, err := h.Store.GetRun(id)
@@ -107,14 +135,18 @@ func (h *Handler) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, run)
+	services, err := h.Store.ListRunServices(id)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, runDetailResponse{Run: run, Services: toSlice(services)})
 }
 
-func (h *Handler) handleGetRunLogs(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	service := r.PathValue("service")
-
-	opts := store.LogQueryOpts{}
+// parseLogQueryOpts extracts filtering/pagination options from the request query.
+func parseLogQueryOpts(r *http.Request) store.LogQueryOpts {
+	var opts store.LogQueryOpts
 
 	if level := r.URL.Query().Get("level"); level != "" {
 		opts.Level = level
@@ -133,7 +165,29 @@ func (h *Handler) handleGetRunLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	return opts
+}
+
+func (h *Handler) handleGetRunLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	service := r.PathValue("service")
+	opts := parseLogQueryOpts(r)
+
 	entries, err := h.Store.QueryLogEntries(id, service, opts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, toSlice(entries))
+}
+
+// handleGetRunLogsAll returns all log entries for a run (across all services).
+func (h *Handler) handleGetRunLogsAll(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	opts := parseLogQueryOpts(r)
+
+	entries, err := h.Store.QueryAllLogEntries(id, opts)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -163,12 +217,11 @@ func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	run, err := h.Runner.StartRun(r.Context(), req.Services, req.Suite)
+	run, err := h.Runner.StartRun(context.Background(), req.Services, req.Suite)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, run)
+	respondJSON(w, http.StatusAccepted, run)
 }
-

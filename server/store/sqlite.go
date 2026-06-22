@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	_ "modernc.org/sqlite"
 )
@@ -50,7 +52,17 @@ type Store struct {
 
 // Open opens the SQLite database at the given path and returns a Store.
 // For ":memory:", an in-memory database is created and the schema is applied.
+// For file paths, non-existent parent directories are created automatically.
 func Open(path string) (*Store, error) {
+	// Create parent directories for file-backed databases to avoid silent
+	// fallback to in-memory when the directory doesn't exist.
+	if path != ":memory:" {
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("create db dir %s: %w", dir, err)
+		}
+	}
+
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
