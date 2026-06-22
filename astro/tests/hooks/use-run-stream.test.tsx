@@ -112,6 +112,23 @@ describe("useRunStream", () => {
     expect(result.current.finalStatus).toBe("success");
   });
 
+  it("does not append 'done' messages to logEntries", () => {
+    const { result } = renderHook(() => useRunStream("run-abc"));
+    act(() => {
+      mockWs._handlers.message(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "done",
+            run_id: "run-abc",
+            status: "passed",
+          }),
+        }),
+      );
+    });
+    expect(result.current.logEntries).toHaveLength(0);
+    expect(result.current.done).toBe(true);
+  });
+
   it("closes the WebSocket on unmount", () => {
     const { unmount } = renderHook(() => useRunStream("run-abc"));
     unmount();

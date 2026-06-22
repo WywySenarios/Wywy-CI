@@ -19,7 +19,7 @@ export interface UseRunStreamResult {
   done: boolean;
   /** The final run status, if known. */
   finalStatus: string | null;
-  /** All log messages received so far (including the "done" message). */
+  /** Log messages received so far (excludes lifecycle messages like "done"). */
   logEntries: LogMessage[];
   /** Error message if the WebSocket encountered an error. */
   error: string | null;
@@ -56,8 +56,9 @@ export function useRunStream(
         if (msg.type === "done") {
           setDone(true);
           setFinalStatus(msg.status ?? null);
+        } else {
+          setLogEntries((prev) => [...prev, msg]);
         }
-        setLogEntries((prev) => [...prev, msg]);
       } catch {
         // ignore malformed messages
       }

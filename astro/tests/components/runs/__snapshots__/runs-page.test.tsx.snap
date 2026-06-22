@@ -1,0 +1,5 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`RunsPage > produces different DOM with and without an id (snapshot) > runs-page-detail 1`] = `"<a href="/runs" class="mb-4 inline-block text-sm text-muted-foreground hover:underline">← Back to runs</a><div data-testid="run-detail-mock">RunDetail for run-abc</div>"`;
+
+exports[`RunsPage > produces different DOM with and without an id (snapshot) > runs-page-list 1`] = `"<h1 class="text-2xl font-bold mb-6">Test Runs</h1><div data-testid="run-list-mock">RunList</div>"`;

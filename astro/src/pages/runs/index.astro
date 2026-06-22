@@ -1,9 +1,8 @@
 ---
 import Layout from "../../components/layout/layout.astro";
-import { RunList } from "../../components/runs/RunList";
+import { RunsPage } from "../../components/runs/RunsPage";
 ---
 
 <Layout>
-  <h1 class="text-2xl font-bold mb-6">Test Runs</h1>
-  <RunList client:load />
+  <RunsPage id={null} client:load />
 </Layout>

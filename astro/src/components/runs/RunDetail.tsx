@@ -2,9 +2,15 @@ import { useEffect, useState } from "react";
 import type { Status } from "@/components/ui/status-badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { DEFAULT_API_BASE } from "@/lib/ci-types";
-import type { Run } from "@/lib/ci-types";
+import type { Run, RunService } from "@/lib/ci-types";
 import { useRunStream } from "@/hooks/useRunStream";
 import type { UseRunStreamResult } from "@/hooks/useRunStream";
+import { ansiToHtml } from "@/lib/ansi";
+
+/** A log entry from the REST API (as opposed to the live WebSocket stream). */
+interface HistoricalLogEntry {
+  content: string;
+}
 
 /**
  * RunDetail fetches a single CI pipeline run from the API and renders its details.
@@ -21,9 +27,13 @@ export function RunDetail({ id, apiBase = DEFAULT_API_BASE }: RunDetailProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [historicalLogEntries, setHistoricalLogEntries] = useState<
+    HistoricalLogEntry[]
+  >([]);
 
   const {
     connected,
+    done,
     finalStatus,
     logEntries,
     error: streamError,
@@ -62,6 +72,28 @@ export function RunDetail({ id, apiBase = DEFAULT_API_BASE }: RunDetailProps) {
     };
   }, [id, apiBase]);
 
+  // Fetch historical logs from REST when the WebSocket delivers "done" without
+  // any live log entries (e.g. for runs that completed before the client connected).
+  useEffect(() => {
+    if (!done || logEntries.length > 0) return;
+
+    let cancelled = false;
+    fetch(`${apiBase}/api/runs/${id}/logs`)
+      .then((res) => (res.ok ? res.json() : Promise.resolve(null)))
+      .then((entries: unknown) => {
+        if (!cancelled && Array.isArray(entries)) {
+          setHistoricalLogEntries(entries as HistoricalLogEntry[]);
+        }
+      })
+      .catch((_err: unknown) => {
+        // Non-critical — historical logs are best-effort.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [done, logEntries, id, apiBase]);
+
   if (loading) {
     return <div data-testid="run-detail-loading">Loading run…</div>;
   }
@@ -81,12 +113,15 @@ export function RunDetail({ id, apiBase = DEFAULT_API_BASE }: RunDetailProps) {
   // WebSocket finalStatus overrides the initially fetched status.
   const displayStatus = finalStatus ?? run.status;
 
+  // Merge live WS log entries with any fetched historical logs.
+  const allLogEntries = [...historicalLogEntries, ...logEntries];
+
   return (
     <div data-testid="run-detail" className="space-y-4">
       <div className="flex items-center gap-x-2">
         <StatusBadge status={displayStatus as Status} />
         <span className="font-mono text-lg">{run.id}</span>
-        {connected && (
+        {connected && !run.finished_at && (
           <span
             data-testid="run-detail-live-indicator"
             className="ml-auto text-xs text-green-500"
@@ -108,14 +143,41 @@ export function RunDetail({ id, apiBase = DEFAULT_API_BASE }: RunDetailProps) {
         )}
       </dl>
 
-      {logEntries.length > 0 && (
+      {run.services && run.services.length > 0 && (
+        <section data-testid="run-detail-services">
+          <h3 className="text-sm font-semibold text-muted-foreground">Services</h3>
+          <div className="space-y-1">
+            {run.services.map((service: RunService) => (
+              <div
+                key={service.service_name}
+                className="flex items-center gap-x-2 text-sm"
+              >
+                <StatusBadge status={service.status as Status} />
+                <span className="font-mono">{service.service_name}</span>
+                {service.exit_code !== null && (
+                  <span
+                    data-testid={`service-exit-code-${service.service_name}`}
+                    className="text-xs text-muted-foreground"
+                  >
+                    exit: {service.exit_code}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {allLogEntries.length > 0 && (
         <>
           <h3 className="text-sm font-semibold text-muted-foreground">Logs</h3>
           <div data-testid="run-detail-log-entries" className="space-y-1">
-            {logEntries.map((entry, i) => (
-              <div key={i} className="font-mono text-xs">
-                {entry.content}
-              </div>
+            {allLogEntries.map((entry, i) => (
+              <div
+                key={i}
+                className="font-mono text-xs"
+                dangerouslySetInnerHTML={{ __html: ansiToHtml(entry.content ?? "") }}
+              />
             ))}
           </div>
         </>
