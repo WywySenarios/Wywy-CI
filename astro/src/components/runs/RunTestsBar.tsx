@@ -9,6 +9,8 @@ interface Service {
   repo: string;
   /** Available test suite names (e.g. ["test", "e2e", "playwright"]). */
   suites: string[];
+  /** Suite names excluded from "All tests" triggering. */
+  deny_list?: string[];
 }
 
 /** Per-suite toast feedback state. */
@@ -114,11 +116,15 @@ export function RunTestsBar({ apiBase = DEFAULT_API_BASE }: RunTestsBarProps) {
    *
    * @param serviceName - The service to run tests on.
    * @param suites - The list of suite names to trigger.
+   * @param denyList - Optional list of suite names to exclude from triggering.
    */
   const triggerAll = useCallback(
-    async (serviceName: string, suites: string[]) => {
+    async (serviceName: string, suites: string[], denyList?: string[]) => {
+      const filtered = denyList
+        ? suites.filter((suite) => !denyList.includes(suite))
+        : suites;
       await Promise.all(
-        suites.map((suite) => triggerSuite(serviceName, suite)),
+        filtered.map((suite) => triggerSuite(serviceName, suite)),
       );
     },
     [triggerSuite],
@@ -178,11 +184,11 @@ export function RunTestsBar({ apiBase = DEFAULT_API_BASE }: RunTestsBarProps) {
                     data-testid={`run-all-${svc.name}`}
                     type="button"
                     disabled={isSvcRunning}
-                    onClick={async () => {
-                      setOpenService(null);
-                      await triggerAll(svc.name, svc.suites);
-                    }}
-                    className="inline-flex items-center gap-x-2 rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+                      onClick={async () => {
+                          setOpenService(null);
+                          await triggerAll(svc.name, svc.suites, svc.deny_list);
+                        }}
+                        className="inline-flex items-center gap-x-2 rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
                   >
                     {isSvcRunning && (
                       <LoaderCircle
