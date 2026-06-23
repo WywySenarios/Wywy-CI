@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wywy-CI test runner script.
-# Runs Go unit tests and Astro component tests.
+# Runs Go unit tests, Astro component tests, and Playwright E2E tests.
 # Compliant with CI runner contract: parses --output-dir= and writes results.jsonl.
 set -euo pipefail
 
@@ -67,6 +67,16 @@ function run_astro_tests() {
     print_pass "Astro tests"
 }
 
+function run_playwright_e2e() {
+    print_info "Running Playwright E2E tests..."
+
+    if ! (cd "$REPO_DIR/astro" && npx playwright test) then
+        print_fail "Playwright E2E tests"
+        return 1
+    fi
+    print_pass "Playwright E2E tests"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -74,6 +84,7 @@ exit_code=0
 
 run_go_tests || exit_code=1
 run_astro_tests || exit_code=1
+run_playwright_e2e || exit_code=1
 
 if [[ "$exit_code" -eq 0 ]]; then
     echo ""
@@ -88,9 +99,11 @@ if [ -n "$output_dir" ]; then
     if [ "$exit_code" -eq 0 ]; then
         echo '{"name":"go-tests","status":"passed"}' > "$output_dir/results.jsonl"
         echo '{"name":"astro-tests","status":"passed"}' >> "$output_dir/results.jsonl"
+        echo '{"name":"playwright-e2e","status":"passed"}' >> "$output_dir/results.jsonl"
     else
         echo '{"name":"go-tests","status":"failed"}' > "$output_dir/results.jsonl"
         echo '{"name":"astro-tests","status":"failed"}' >> "$output_dir/results.jsonl"
+        echo '{"name":"playwright-e2e","status":"failed"}' >> "$output_dir/results.jsonl"
     fi
 fi
 

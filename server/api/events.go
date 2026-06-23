@@ -21,6 +21,7 @@ type RunEvent struct {
 	Type        string `json:"type"` // "run_started" | "run_finished"
 	RunID       string `json:"run_id"`
 	ServiceName string `json:"service_name"`
+	Suite       string `json:"suite"`
 	Status      string `json:"status,omitempty"` // "running" | "passed" | "failed" | "cancelled"
 	Timestamp   string `json:"timestamp"`
 }
@@ -112,6 +113,7 @@ func (a *eventBroadcasterAdapter) Publish(event orchestrator.LifecycleEvent) {
 		Type:        event.Type,
 		RunID:       event.RunID,
 		ServiceName: event.ServiceName,
+		Suite:       event.Suite,
 		Status:      event.Status,
 		Timestamp:   event.Timestamp,
 	})

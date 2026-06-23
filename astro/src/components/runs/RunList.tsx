@@ -61,6 +61,8 @@ export function RunList({ apiBase = DEFAULT_API_BASE }: RunListProps) {
               className="block rounded-lg transition-colors hover:bg-muted/50"
             >
               <div className="flex items-center gap-x-2 rounded-lg border p-3">
+                {/* type assertion: API returns string for status; we validate
+                    it matches the Status union at the fetch boundary. */}
                 <StatusBadge status={run.status as Status} />
                 <span className="font-mono text-sm">{run.id}</span>
                 <span className="ml-auto text-xs text-muted-foreground">

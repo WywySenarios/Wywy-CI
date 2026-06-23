@@ -242,6 +242,76 @@ func TestGetRunReturnsServicesWithExitCode(t *testing.T) {
 	}
 }
 
+func TestCreateRunWithSingleServiceReturnsOneServiceOnGet(t *testing.T) {
+	s := newTestStore(t)
+	runner := orchestrator.NewRunner(s, &fakeRunner{exitCode: 0, output: "ok"})
+
+	// Note: validServices=nil means no validation — any service name is accepted.
+	srv := newTestServer(t, s, runner, nil)
+	defer srv.Close()
+
+	// Create a run with ONE service.
+	body := bytes.NewBufferString(`{"services":["agentic"],"suite":"test"}`)
+	resp, err := http.Post(srv.URL+"/api/runs", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST /api/runs: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST status: want 202, got %d", resp.StatusCode)
+	}
+
+	// Extract the run ID from the POST response.
+	var createResult map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&createResult); err != nil {
+		t.Fatalf("decode POST body: %v", err)
+	}
+	runID, ok := createResult["id"].(string)
+	if !ok || runID == "" {
+		t.Fatal("POST response missing 'id'")
+	}
+
+	// Give the goroutine a moment to complete so services get exit codes.
+	time.Sleep(200 * time.Millisecond)
+
+	// GET the run detail.
+	getResp, err := http.Get(srv.URL + "/api/runs/" + runID)
+	if err != nil {
+		t.Fatalf("GET /api/runs/%s: %v", runID, err)
+	}
+	defer getResp.Body.Close()
+
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status: want 200, got %d", getResp.StatusCode)
+	}
+
+	var getResult map[string]any
+	if err := json.NewDecoder(getResp.Body).Decode(&getResult); err != nil {
+		t.Fatalf("decode GET body: %v", err)
+	}
+
+	services, ok := getResult["services"].([]any)
+	if !ok {
+		t.Fatal("GET response is missing 'services' array — exit codes are not exposed to the frontend")
+	}
+
+	// MUST have exactly one service — only the tested service.
+	if len(services) != 1 {
+		t.Fatalf("services: want exactly 1 (the tested service), got %d — "+
+			"bug: exit codes for untested services are leaked to the UI", len(services))
+	}
+
+	svc := services[0].(map[string]any)
+	if name, ok := svc["service_name"]; !ok || name != "agentic" {
+		t.Errorf("service_name: want 'agentic', got %v", name)
+	}
+	// Exit code must be non-nil — the service was executed (even if failed in test setup).
+	if exitCode, ok := svc["exit_code"]; !ok || exitCode == nil {
+		t.Error("service entry has nil exit_code — service was not processed")
+	}
+}
+
 func TestGetRunNotFound(t *testing.T) {
 	s := newTestStore(t)
 
@@ -519,20 +589,20 @@ func TestListActiveRuns(t *testing.T) {
 		t.Errorf("Content-Type: want application/json, got %q", ct)
 	}
 
-	var result map[string]map[string]bool
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var outer map[string]map[string]map[string]bool
+	if err := json.NewDecoder(resp.Body).Decode(&outer); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
 
-	active, ok := result["active_services"]
+	suites, ok := outer["active_suites"]
 	if !ok {
-		t.Fatal("response missing 'active_services'")
+		t.Fatal("response missing 'active_suites'")
 	}
 
-	if !active["agentic"] {
-		t.Error("agentic should be active (running)")
+	if !suites["agentic"]["test"] {
+		t.Error("agentic/test should be active (running)")
 	}
-	if active["ci"] {
+	if suites["ci"] != nil && suites["ci"]["test"] {
 		t.Error("ci should NOT be active (completed)")
 	}
 }

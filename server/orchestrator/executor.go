@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,32 @@ func (r *ServiceScriptResolver) ResolveScriptPath(service, suite string) (string
 		return "", fmt.Errorf("unknown service: %s", service)
 	}
 	return fmt.Sprintf("%s/%s/scripts/tests/%s.sh", r.reposBasePath, repo, suite), nil
+}
+
+// ListSuites returns the available test suite names for a service by listing
+// *.sh files in the service's scripts/tests/ directory.
+func (r *ServiceScriptResolver) ListSuites(service string) ([]string, error) {
+	repo, ok := r.services[service]
+	if !ok {
+		return nil, fmt.Errorf("unknown service: %s", service)
+	}
+	pattern := filepath.Join(r.reposBasePath, repo, "scripts/tests", "*.sh")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("list suites for %s: %w", service, err)
+	}
+	// Deduplicate suite names (in case of multiple matches with the same base).
+	seen := make(map[string]bool)
+	var suites []string
+	for _, match := range matches {
+		base := filepath.Base(match)
+		suite := strings.TrimSuffix(base, ".sh")
+		if !seen[suite] {
+			seen[suite] = true
+			suites = append(suites, suite)
+		}
+	}
+	return suites, nil
 }
 
 // ScriptInvocation defines the parameters for invoking a test script.

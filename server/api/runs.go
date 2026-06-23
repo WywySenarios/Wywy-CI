@@ -54,9 +54,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Service represents a monitored service from services.txt.
 type Service struct {
-	Name string `json:"name"`
-	Repo string `json:"repo"`
-	Port int    `json:"port"`
+	Name   string   `json:"name"`
+	Repo   string   `json:"repo"`
+	Port   int      `json:"port"`
+	Suites []string `json:"suites"`
 }
 
 func (h *Handler) handleListServices(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +85,12 @@ func (h *Handler) handleListServices(w http.ResponseWriter, r *http.Request) {
 		if len(parts) >= 3 {
 			svc.Port, _ = strconv.Atoi(strings.TrimSpace(parts[2]))
 		}
+		if h.Runner != nil {
+			suites, listErr := h.Runner.ListSuites(svc.Name)
+			if listErr == nil && len(suites) > 0 {
+				svc.Suites = suites
+			}
+		}
 		services = append(services, svc)
 	}
 
@@ -106,20 +113,27 @@ func (h *Handler) handleListActiveRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	active := make(map[string]bool)
+	// Build nested map: service_name -> suite -> bool
+	active := make(map[string]map[string]bool)
 	for _, svc := range services {
-		active[svc] = true
+		if active[svc.ServiceName] == nil {
+			active[svc.ServiceName] = make(map[string]bool)
+		}
+		active[svc.ServiceName][svc.Suite] = true
 	}
 
-	respondJSON(w, http.StatusOK, map[string]map[string]bool{
-		"active_services": active,
+	respondJSON(w, http.StatusOK, map[string]map[string]map[string]bool{
+		"active_suites": active,
 	})
 }
 
-// runDetailResponse wraps a Run with its services for the GET /api/runs/{id} response.
+// runDetailResponse is the JSON response for GET /api/runs/{id}.
 type runDetailResponse struct {
-	*store.Run
-	Services []store.RunService `json:"services"`
+	ID         string             `json:"id"`
+	CreatedAt  string             `json:"created_at"`
+	FinishedAt string             `json:"finished_at,omitempty"`
+	Status     string             `json:"status"`
+	Services   []store.RunService `json:"services"`
 }
 
 func (h *Handler) handleGetRun(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +155,13 @@ func (h *Handler) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, runDetailResponse{Run: run, Services: toSlice(services)})
+	respondJSON(w, http.StatusOK, runDetailResponse{
+		ID:         run.ID,
+		CreatedAt:  run.CreatedAt,
+		FinishedAt: run.FinishedAt,
+		Status:     run.Status,
+		Services:   toSlice(services),
+	})
 }
 
 // parseLogQueryOpts extracts filtering/pagination options from the request query.

@@ -8,8 +8,8 @@ import { test, expect } from "@playwright/test";
  * the `?id` parameter client-side via `window.location.search` after
  * hydration.
  *
- * The list endpoint (`**/api/runs`) is mocked to return an empty array,
- * but the detail endpoint (`/api/runs/:id`) is NOT — so the detail view
+ * The list endpoint is mocked to return an empty array,
+ * but the detail endpoint is NOT — so the detail view
  * shows an error/not-found state after hydration. This produces visually
  * different screenshots even though the SSR output is the same.
  *

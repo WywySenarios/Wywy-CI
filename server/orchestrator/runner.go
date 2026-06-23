@@ -34,6 +34,7 @@ type LifecycleEvent struct {
 	Type        string // "run_started" | "run_finished"
 	RunID       string
 	ServiceName string
+	Suite       string
 	Status      string
 	Timestamp   string
 }
@@ -67,6 +68,15 @@ func (r *Runner) SetEventBroadcaster(eb EventBroadcaster) {
 // SetResolver configures the script resolver for detached script execution.
 func (r *Runner) SetResolver(resolver *ServiceScriptResolver) {
 	r.resolver = resolver
+}
+
+// ListSuites returns the available test suite names for a service.
+// Returns nil if no resolver is configured (no-op without an error).
+func (r *Runner) ListSuites(service string) ([]string, error) {
+	if r.resolver == nil {
+		return nil, nil
+	}
+	return r.resolver.ListSuites(service)
 }
 
 // NewRunner creates a new Runner.
@@ -122,6 +132,7 @@ func (r *Runner) StartRun(ctx context.Context, services []string, suite string) 
 				Type:        "run_started",
 				RunID:       runID,
 				ServiceName: svc,
+				Suite:       suite,
 				Status:      "running",
 				Timestamp:   timestamp(),
 			})
@@ -325,6 +336,7 @@ func (r *Runner) executeServices(ctx context.Context, runID string, suite string
 					Type:        "run_finished",
 					RunID:       runID,
 					ServiceName: serviceName,
+					Suite:       suite,
 					Status:      status,
 					Timestamp:   endTime,
 				})

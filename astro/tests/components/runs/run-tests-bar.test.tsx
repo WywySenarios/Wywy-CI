@@ -13,14 +13,15 @@ const mockUseServiceStatus = useServiceStatus as ReturnType<typeof vi.fn>;
 
 describe("RunTestsBar", () => {
   const mockServices = [
-    { name: "ci", repo: "Wywy-CI" },
-    { name: "agentic", repo: "Wywy-Codes" },
-    { name: "cache", repo: "Wywy-Website-Cache" },
+    { name: "ci", repo: "Wywy-CI", suites: ["test", "e2e"] },
+    { name: "agentic", repo: "Wywy-Codes", suites: ["test"] },
+    { name: "cache", repo: "Wywy-Website-Cache", suites: ["test"] },
   ];
 
   beforeEach(() => {
-    // Default: all services not running, WebSocket connected.
+    // Default: no suites running, WebSocket connected.
     mockUseServiceStatus.mockReturnValue({
+      suiteStatus: {},
       serviceStatus: {},
       connected: true,
       error: null,
@@ -31,106 +32,12 @@ describe("RunTestsBar", () => {
     vi.restoreAllMocks();
   });
 
+  // ── Loading / error / empty ────────────────────────────────────
+
   it("shows a loading indicator while services are being fetched", () => {
     globalThis.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
     render(<RunTestsBar />);
     expect(screen.getByTestId("run-tests-bar-loading")).toBeInTheDocument();
-  });
-
-  it("renders a heading and a button per service after fetch resolves", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve(mockServices),
-    });
-
-    render(<RunTestsBar />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("heading", { name: /^run tests$/i }),
-      ).toBeInTheDocument();
-    });
-
-    for (const svc of mockServices) {
-      expect(
-        screen.getByRole("button", { name: new RegExp(svc.name, "i") }),
-      ).toBeInTheDocument();
-    }
-  });
-
-  it("disables the button when useServiceStatus reports that service is running", async () => {
-    mockUseServiceStatus.mockReturnValue({
-      serviceStatus: { ci: true },
-      connected: true,
-      error: null,
-    });
-
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve(mockServices),
-    });
-
-    render(<RunTestsBar />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /ci running/i }),
-      ).toBeDisabled();
-    });
-
-    // Other services should remain enabled.
-    expect(
-      screen.getByRole("button", { name: /agentic/i }),
-    ).not.toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: /cache/i }),
-    ).not.toBeDisabled();
-  });
-
-  it("calls POST /api/runs when a button is clicked", async () => {
-    const mockFetch = vi.fn();
-    // First fetch: GET /api/services (from RunTestsBar mount).
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve(mockServices),
-    });
-    // Second fetch: POST /api/runs (from RunButton click).
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 202,
-      json: () => Promise.resolve({ id: "run-abc", status: "running" }),
-    });
-    globalThis.fetch = mockFetch;
-
-    render(<RunTestsBar />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^run tests for ci$/i })).toBeInTheDocument();
-    });
-
-    await userEvent.click(screen.getByRole("button", { name: /^run tests for ci$/i }));
-
-    await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledTimes(2);
-    });
-
-    // Call #1: GET /api/services.
-    expect(mockFetch.mock.calls[0][0]).toBe(
-      "http://localhost:2526/api/services",
-    );
-    expect(mockFetch.mock.calls[0][1]).toBeUndefined();
-
-    // Call #2: POST /api/runs.
-    expect(mockFetch.mock.calls[1][0]).toBe(
-      "http://localhost:2526/api/runs",
-    );
-    expect(mockFetch.mock.calls[1][1]).toEqual(
-      expect.objectContaining({
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ services: ["ci"], suite: "test", flags: [] }),
-      }),
-    );
   });
 
   it("shows an error state when the services fetch fails", async () => {
@@ -156,7 +63,340 @@ describe("RunTestsBar", () => {
     });
   });
 
-  // --- F7: Inline feedback (toast) ---
+  // ── Rendering ──────────────────────────────────────────────────
+
+  it("renders a heading and a trigger button per service after fetch resolves", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("heading", { name: /^run tests$/i }),
+      ).toBeInTheDocument();
+    });
+
+    for (const svc of mockServices) {
+      expect(
+        screen.getByTestId(`service-trigger-${svc.name}`),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("opens a dropdown with suite options when a trigger is clicked", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    // Click the ci trigger to open the dropdown.
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    // ci has suites: ["test", "e2e"] → both options visible.
+    expect(screen.getByTestId("run-all-ci")).toBeInTheDocument();
+    expect(screen.getByTestId("run-test-ci")).toBeInTheDocument();
+    expect(screen.getByTestId("run-e2e-ci")).toBeInTheDocument();
+  });
+
+  it("renders suite options from each service's suites field, not a hardcoded list", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    // ci has suites ["test", "e2e"].
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+    expect(screen.getByTestId("run-test-ci")).toBeInTheDocument();
+    expect(screen.getByTestId("run-e2e-ci")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("service-trigger-ci")); // close
+
+    // agentic has suites ["test"] only → no "e2e" option.
+    await userEvent.click(screen.getByTestId("service-trigger-agentic"));
+    expect(screen.getByTestId("run-test-agentic")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("run-e2e-agentic"),
+    ).not.toBeInTheDocument();
+  });
+
+  // ── Triggering runs ────────────────────────────────────────────
+
+  it("calls POST /api/runs for a specific suite when user clicks that suite option", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 202,
+      json: () => Promise.resolve({ id: "run-abc", status: "running" }),
+    });
+    globalThis.fetch = mockFetch;
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    // Open the ci dropdown.
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    // Click the "test" suite option.
+    await userEvent.click(screen.getByTestId("run-test-ci"));
+
+    await waitFor(() => {
+      // Call #1: GET /api/services; call #2: POST /api/runs.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    expect(mockFetch.mock.calls[1][0]).toBe(
+      "http://localhost:2526/api/runs",
+    );
+    expect(mockFetch.mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ services: ["ci"], suite: "test", flags: [] }),
+      }),
+    );
+  });
+
+  it("calls POST /api/runs for each suite when 'All tests' is clicked (ci: 2 suites)", async () => {
+    const mockFetch = vi.fn();
+    // First call: GET /api/services.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+    // Leave POST calls pending so they can be inspected before resolution.
+    const pendingPromise = new Promise(() => {});
+    mockFetch.mockImplementation(() => pendingPromise);
+    globalThis.fetch = mockFetch;
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    // Open the ci dropdown.
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    // Click "All tests".
+    await userEvent.click(screen.getByTestId("run-all-ci"));
+
+    await waitFor(() => {
+      // 1 GET + 2 POSTs = 3 calls.
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    // First POST: suite "test".
+    expect(mockFetch.mock.calls[1][1].body).toContain('"suite":"test"');
+    expect(mockFetch.mock.calls[1][1].body).toContain('"services":["ci"]');
+
+    // Second POST: suite "e2e".
+    expect(mockFetch.mock.calls[2][1].body).toContain('"suite":"e2e"');
+    expect(mockFetch.mock.calls[2][1].body).toContain('"services":["ci"]');
+  });
+
+  it("calls POST /api/runs once when 'All tests' is clicked on agentic (1 suite)", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+    const pendingPromise = new Promise(() => {});
+    mockFetch.mockImplementation(() => pendingPromise);
+    globalThis.fetch = mockFetch;
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-agentic")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-agentic"));
+    await userEvent.click(screen.getByTestId("run-all-agentic"));
+
+    await waitFor(() => {
+      // 1 GET + 1 POST = 2 calls (agentic only has ["test"]).
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    expect(mockFetch.mock.calls[1][1].body).toContain('"suite":"test"');
+    expect(mockFetch.mock.calls[1][1].body).toContain('"services":["agentic"]');
+  });
+
+  // ── Spinner states ─────────────────────────────────────────────
+
+  it("shows a spinner on 'All tests' when any suite is running for that service", async () => {
+    mockUseServiceStatus.mockReturnValue({
+      suiteStatus: { ci: { test: true } },
+      serviceStatus: { ci: true },
+      connected: true,
+      error: null,
+    });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    // "All tests" option has a spinner because a suite is running.
+    expect(screen.getByTestId("spinner-run-all-ci")).toBeInTheDocument();
+  });
+
+  it("shows a spinner on a specific suite when that suite is running", async () => {
+    mockUseServiceStatus.mockReturnValue({
+      suiteStatus: { ci: { test: true, e2e: false } },
+      serviceStatus: { ci: true },
+      connected: true,
+      error: null,
+    });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    // "test" suite has a spinner because it's running.
+    expect(screen.getByTestId("spinner-run-test-ci")).toBeInTheDocument();
+
+    // "e2e" suite has no spinner because it's not running.
+    expect(
+      screen.queryByTestId("spinner-run-e2e-ci"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show any spinners when no suites are running", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    expect(screen.queryByTestId("spinner-run-all-ci")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("spinner-run-test-ci"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("spinner-run-e2e-ci"),
+    ).not.toBeInTheDocument();
+  });
+
+  // ── Disabled states ────────────────────────────────────────────
+
+  it("disables 'All tests' when any suite is running for that service", async () => {
+    mockUseServiceStatus.mockReturnValue({
+      suiteStatus: { ci: { test: true } },
+      serviceStatus: { ci: true },
+      connected: true,
+      error: null,
+    });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    expect(screen.getByTestId("run-all-ci")).toBeDisabled();
+  });
+
+  it("disables a specific suite option when that suite is running", async () => {
+    mockUseServiceStatus.mockReturnValue({
+      suiteStatus: { ci: { test: true, e2e: false } },
+      serviceStatus: { ci: true },
+      connected: true,
+      error: null,
+    });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    // "test" is running → disabled.
+    expect(screen.getByTestId("run-test-ci")).toBeDisabled();
+
+    // "e2e" is not running → enabled.
+    expect(screen.getByTestId("run-e2e-ci")).not.toBeDisabled();
+  });
+
+  it("does not disable any options when no suites are running", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServices),
+    });
+
+    render(<RunTestsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+
+    expect(screen.getByTestId("run-all-ci")).not.toBeDisabled();
+    expect(screen.getByTestId("run-test-ci")).not.toBeDisabled();
+    expect(screen.getByTestId("run-e2e-ci")).not.toBeDisabled();
+  });
+
+  // ── Toast feedback ────────────────────────────────────────────
 
   it("shows a success toast with service name and suite name after a successful POST", async () => {
     const mockFetch = vi.fn();
@@ -174,14 +414,11 @@ describe("RunTestsBar", () => {
     render(<RunTestsBar />);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /^run tests for ci$/i }),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
     });
 
-    await userEvent.click(
-      screen.getByRole("button", { name: /^run tests for ci$/i }),
-    );
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+    await userEvent.click(screen.getByTestId("run-test-ci"));
 
     await waitFor(() => {
       expect(
@@ -202,14 +439,11 @@ describe("RunTestsBar", () => {
     render(<RunTestsBar />);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /^run tests for ci$/i }),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
     });
 
-    await userEvent.click(
-      screen.getByRole("button", { name: /^run tests for ci$/i }),
-    );
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+    await userEvent.click(screen.getByTestId("run-test-ci"));
 
     await waitFor(() => {
       expect(
@@ -234,20 +468,16 @@ describe("RunTestsBar", () => {
     render(<RunTestsBar />);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /^run tests for ci$/i }),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
     });
 
-    await userEvent.click(
-      screen.getByRole("button", { name: /^run tests for ci$/i }),
-    );
+    await userEvent.click(screen.getByTestId("service-trigger-ci"));
+    await userEvent.click(screen.getByTestId("run-test-ci"));
 
     await waitFor(() => {
       expect(screen.getByText(/tests triggered for ci/i)).toBeInTheDocument();
     });
 
-    // Message should auto-dismiss after 3 seconds.
     await waitFor(
       () => {
         expect(
@@ -258,32 +488,24 @@ describe("RunTestsBar", () => {
     );
   }, 10000);
 
-  it("forwards apiBase to useServiceStatus and fetch", async () => {
-    mockUseServiceStatus.mockReturnValue({
-      serviceStatus: { ci: false },
-      connected: true,
-      error: null,
-    });
+  // ── apiBase ────────────────────────────────────────────────────
 
+  it("forwards apiBase to useServiceStatus and fetch", async () => {
     const customBase = "https://ci.example.com";
 
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve([{ name: "ci", repo: "Wywy-CI" }]),
+      json: () => Promise.resolve([{ name: "ci", repo: "Wywy-CI", suites: ["test"] }]),
     });
 
     render(<RunTestsBar apiBase={customBase} />);
 
-    // useServiceStatus should have been called with the custom base.
     expect(mockUseServiceStatus).toHaveBeenCalledWith(customBase);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /ci/i }),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("service-trigger-ci")).toBeInTheDocument();
     });
 
-    // The services fetch should use the custom base.
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://ci.example.com/api/services",
     );

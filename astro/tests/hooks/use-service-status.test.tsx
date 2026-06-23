@@ -1,7 +1,6 @@
 import { renderHook, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useServiceStatus } from "@/hooks/useServiceStatus";
-import { DEFAULT_API_BASE } from "@/lib/ci-types";
 
 /** Minimal WebSocket surface needed by the hook. */
 interface MockWebSocket {
@@ -14,6 +13,26 @@ interface MockWebSocket {
 
 describe("useServiceStatus", () => {
   let mockWs: MockWebSocket & { _handlers: Record<string, EventListener> };
+
+  const runStartedEvent = (overrides: Record<string, string> = {}) => ({
+    type: "run_started",
+    run_id: "run-abc",
+    service_name: "ci",
+    suite: "test",
+    status: "running",
+    timestamp: "2026-06-18T12:00:00Z",
+    ...overrides,
+  });
+
+  const runFinishedEvent = (overrides: Record<string, string> = {}) => ({
+    type: "run_finished",
+    run_id: "run-abc",
+    service_name: "ci",
+    suite: "test",
+    status: "passed",
+    timestamp: "2026-06-18T12:05:00Z",
+    ...overrides,
+  });
 
   beforeEach(() => {
     const handlers: Record<string, EventListener> = {};
@@ -37,15 +56,14 @@ describe("useServiceStatus", () => {
     vi.restoreAllMocks();
   });
 
-  function mockFetchActiveServices(services: Record<string, boolean>) {
+  function mockFetchActiveSuites(suites: Record<string, Record<string, boolean>>) {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ active_services: services }),
+      json: () => Promise.resolve({ active_suites: suites }),
     });
   }
 
   function expectNoFetch() {
-    // If fetch was never mocked, a call would throw — just check it wasn't called.
     if (vi.isMockFunction(globalThis.fetch)) {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     }
@@ -65,8 +83,9 @@ describe("useServiceStatus", () => {
     );
   });
 
-  it("starts with empty serviceStatus, connected=false, error=null", () => {
+  it("starts with empty status, connected=false, error=null", () => {
     const { result } = renderHook(() => useServiceStatus());
+    expect(result.current.suiteStatus).toEqual({});
     expect(result.current.serviceStatus).toEqual({});
     expect(result.current.connected).toBe(false);
     expect(result.current.error).toBeNull();
@@ -80,107 +99,133 @@ describe("useServiceStatus", () => {
     expect(result.current.connected).toBe(true);
   });
 
-  it("marks service as running on run_started event", () => {
+  it("marks suite and service as running on run_started event", () => {
     const { result } = renderHook(() => useServiceStatus());
     act(() => {
       mockWs._handlers.message(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            type: "run_started",
-            run_id: "run-abc",
-            service_name: "ci",
-            status: "running",
-            timestamp: "2026-06-18T12:00:00Z",
-          }),
+          data: JSON.stringify(runStartedEvent()),
         }),
       );
     });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: true } });
     expect(result.current.serviceStatus).toEqual({ ci: true });
   });
 
-  it("marks service as not running on run_finished event", () => {
+  it("clears suite and service on run_finished event", () => {
     const { result } = renderHook(() => useServiceStatus());
-    // First start it.
-    act(() => {
-      mockWs._handlers.message(
-        new MessageEvent("message", {
-          data: JSON.stringify({
-            type: "run_started",
-            run_id: "run-abc",
-            service_name: "agentic",
-            status: "running",
-            timestamp: "2026-06-18T12:00:00Z",
-          }),
-        }),
-      );
-    });
-    expect(result.current.serviceStatus).toEqual({ agentic: true });
 
-    // Then finish it.
+    // Start it.
     act(() => {
       mockWs._handlers.message(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            type: "run_finished",
-            run_id: "run-abc",
-            service_name: "agentic",
-            status: "passed",
-            timestamp: "2026-06-18T12:05:00Z",
-          }),
+          data: JSON.stringify(runStartedEvent()),
         }),
       );
     });
-    expect(result.current.serviceStatus).toEqual({ agentic: false });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: true } });
+    expect(result.current.serviceStatus).toEqual({ ci: true });
+
+    // Finish it.
+    act(() => {
+      mockWs._handlers.message(
+        new MessageEvent("message", {
+          data: JSON.stringify(runFinishedEvent()),
+        }),
+      );
+    });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: false } });
+    expect(result.current.serviceStatus).toEqual({ ci: false });
+  });
+
+  it("tracks multiple suites for the same service independently", () => {
+    const { result } = renderHook(() => useServiceStatus());
+
+    // Start test suite.
+    act(() => {
+      mockWs._handlers.message(
+        new MessageEvent("message", {
+          data: JSON.stringify(runStartedEvent({ service_name: "ci", suite: "test", run_id: "run-1" })),
+        }),
+      );
+    });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: true } });
+    expect(result.current.serviceStatus).toEqual({ ci: true });
+
+    // Start e2e suite on same service.
+    act(() => {
+      mockWs._handlers.message(
+        new MessageEvent("message", {
+          data: JSON.stringify(runStartedEvent({ service_name: "ci", suite: "e2e", run_id: "run-2" })),
+        }),
+      );
+    });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: true, e2e: true } });
+    expect(result.current.serviceStatus).toEqual({ ci: true });
+
+    // Finish test suite only.
+    act(() => {
+      mockWs._handlers.message(
+        new MessageEvent("message", {
+          data: JSON.stringify(runFinishedEvent({ service_name: "ci", suite: "test", run_id: "run-1" })),
+        }),
+      );
+    });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: false, e2e: true } });
+    // Service still running because e2e is still active.
+    expect(result.current.serviceStatus).toEqual({ ci: true });
+
+    // Finish e2e suite.
+    act(() => {
+      mockWs._handlers.message(
+        new MessageEvent("message", {
+          data: JSON.stringify(runFinishedEvent({ service_name: "ci", suite: "e2e", run_id: "run-2" })),
+        }),
+      );
+    });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: false, e2e: false } });
+    expect(result.current.serviceStatus).toEqual({ ci: false });
   });
 
   it("tracks multiple services independently", () => {
     const { result } = renderHook(() => useServiceStatus());
 
-    // Start ci.
+    // Start ci test.
     act(() => {
       mockWs._handlers.message(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            type: "run_started",
-            run_id: "run-1",
-            service_name: "ci",
-            status: "running",
-            timestamp: "2026-06-18T12:00:00Z",
-          }),
+          data: JSON.stringify(runStartedEvent({ service_name: "ci", suite: "test", run_id: "run-1" })),
         }),
       );
     });
+    expect(result.current.suiteStatus).toEqual({ ci: { test: true } });
     expect(result.current.serviceStatus).toEqual({ ci: true });
 
-    // Start agentic.
+    // Start agentic test.
     act(() => {
       mockWs._handlers.message(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            type: "run_started",
-            run_id: "run-2",
-            service_name: "agentic",
-            status: "running",
-            timestamp: "2026-06-18T12:01:00Z",
-          }),
+          data: JSON.stringify(runStartedEvent({ service_name: "agentic", suite: "test", run_id: "run-2" })),
         }),
       );
+    });
+    expect(result.current.suiteStatus).toEqual({
+      ci: { test: true },
+      agentic: { test: true },
     });
     expect(result.current.serviceStatus).toEqual({ ci: true, agentic: true });
 
-    // Finish ci.
+    // Finish ci test.
     act(() => {
       mockWs._handlers.message(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            type: "run_finished",
-            run_id: "run-1",
-            service_name: "ci",
-            status: "passed",
-            timestamp: "2026-06-18T12:05:00Z",
-          }),
+          data: JSON.stringify(runFinishedEvent({ service_name: "ci", suite: "test", run_id: "run-1" })),
         }),
       );
+    });
+    expect(result.current.suiteStatus).toEqual({
+      ci: { test: false },
+      agentic: { test: true },
     });
     expect(result.current.serviceStatus).toEqual({ ci: false, agentic: true });
   });
@@ -202,18 +247,18 @@ describe("useServiceStatus", () => {
     });
     expect(result.current.connected).toBe(false);
     expect(result.current.error).toBeNull();
+    expect(result.current.suiteStatus).toEqual({});
     expect(result.current.serviceStatus).toEqual({});
   });
 
   it("does not fetch /api/runs/active before WebSocket is connected", () => {
-    mockFetchActiveServices({});
+    mockFetchActiveSuites({});
     renderHook(() => useServiceStatus());
-    // Fetch should not be called yet — WS hasn't opened.
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("fetches /api/runs/active when WebSocket connects", () => {
-    mockFetchActiveServices({ ci: true });
+    mockFetchActiveSuites({});
     renderHook(() => useServiceStatus());
     act(() => {
       mockWs._handlers.open(new Event("open"));
@@ -225,7 +270,7 @@ describe("useServiceStatus", () => {
   });
 
   it("uses custom apiBase when fetching active runs", () => {
-    mockFetchActiveServices({});
+    mockFetchActiveSuites({});
     renderHook(() => useServiceStatus("https://ci.example.com"));
     act(() => {
       mockWs._handlers.open(new Event("open"));
@@ -235,27 +280,32 @@ describe("useServiceStatus", () => {
     );
   });
 
-  it("merges active_services from fetch into serviceStatus", async () => {
-    mockFetchActiveServices({ ci: true, agentic: false });
+  it("initializes suiteStatus from active_suites fetch response", async () => {
+    mockFetchActiveSuites({
+      ci: { test: true, e2e: false },
+      agentic: { test: false },
+    });
     const { result } = renderHook(() => useServiceStatus());
 
     act(() => {
       mockWs._handlers.open(new Event("open"));
     });
 
-    // Wait for fetch promise to resolve.
     await act(async () => {
       await vi.waitFor(() => {
-        expect(result.current.serviceStatus).toHaveProperty("ci");
+        expect(result.current.suiteStatus).toHaveProperty("ci");
       });
     });
 
-    // ci is running from the fetch response.
+    expect(result.current.suiteStatus).toEqual({
+      ci: { test: true, e2e: false },
+      agentic: { test: false },
+    });
     expect(result.current.serviceStatus).toEqual({ ci: true, agentic: false });
   });
 
   it("fetch only happens once even if multiple events fire", () => {
-    mockFetchActiveServices({ ci: true });
+    mockFetchActiveSuites({});
     renderHook(() => useServiceStatus());
 
     act(() => {

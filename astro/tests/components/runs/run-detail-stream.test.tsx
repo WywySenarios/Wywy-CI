@@ -184,6 +184,58 @@ describe("RunDetail WebSocket integration", () => {
     expect(exitCodeElem).toHaveTextContent("1");
   });
 
+  it("does not show exit code for services with null exit_code", async () => {
+    mockUseRunStream.mockReturnValue({
+      ...defaultMockStream(),
+      done: true,
+      finalStatus: null,
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: "run-abc",
+        status: "passed",
+        created_at: "2026-06-22T00:55:12Z",
+        finished_at: "2026-06-22T00:55:12Z",
+        services: [
+          {
+            run_id: "run-abc",
+            service_name: "ci",
+            suite: "test",
+            status: "passed",
+            exit_code: 0,
+            start_time: "",
+            end_time: "2026-06-22T00:55:12Z",
+          },
+          {
+            run_id: "run-abc",
+            service_name: "frontend",
+            suite: "test",
+            status: "pending",
+            exit_code: null,
+            start_time: "",
+            end_time: "",
+          },
+        ],
+      }),
+    } as Response);
+
+    render(<RunDetail id="run-abc" />);
+    expect(await screen.findByTestId("run-detail")).toBeInTheDocument();
+
+    // The tested service must show its exit code.
+    expect(screen.getByTestId("service-exit-code-ci")).toHaveTextContent("0");
+
+    // The untested service must NOT show an exit code (exit_code is null).
+    expect(
+      screen.queryByTestId("service-exit-code-frontend"),
+    ).not.toBeInTheDocument();
+
+    // Exactly one exit code element must be present (only the tested service).
+    const allExitCodes = screen.getAllByTestId(/^service-exit-code-/);
+    expect(allExitCodes).toHaveLength(1);
+  });
+
   it("renders ANSI-colored log entries as styled HTML spans", async () => {
     mockUseRunStream.mockReturnValue({
       ...defaultMockStream(),

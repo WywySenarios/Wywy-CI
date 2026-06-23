@@ -22,7 +22,7 @@ describe("RunButton", () => {
 
   it("renders a button with Run Tests text when not running", () => {
     render(<RunButton serviceName="ci" isRunning={false} onRunClick={() => {}} />);
-    const btn = screen.getByRole("button", { name: /run tests/i });
+    const btn = screen.getByRole("button", { name: /^run ci test$/i });
     expect(btn).toBeInTheDocument();
     expect(btn).not.toBeDisabled();
   });
@@ -30,7 +30,7 @@ describe("RunButton", () => {
   it("calls onRunClick with the service name when clicked", async () => {
     const onClick = vi.fn();
     render(<RunButton serviceName="ci" isRunning={false} onRunClick={onClick} />);
-    const btn = screen.getByRole("button", { name: /run tests/i });
+    const btn = screen.getByRole("button", { name: /^run ci test$/i });
     await userEvent.click(btn);
     expect(onClick).toHaveBeenCalledTimes(1);
     expect(onClick).toHaveBeenCalledWith("ci");

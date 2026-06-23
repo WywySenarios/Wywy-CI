@@ -105,7 +105,7 @@ export function RunButton({
     label = `Failed`;
   } else {
     icon = <Play data-testid="play-icon" className="h-4 w-4" />;
-    label = `Run Tests for ${serviceName}`;
+    label = `Run ${serviceName} ${suite}`;
   }
 
   return (

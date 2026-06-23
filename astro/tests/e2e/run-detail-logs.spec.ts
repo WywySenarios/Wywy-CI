@@ -25,4 +25,23 @@ test.describe("Run detail logs", () => {
     expect(text).not.toBeNull();
     expect(text!.trim().length).toBeGreaterThan(0);
   });
+
+  test("shows exit code only for the tested service, not for all services", async ({ page }) => {
+    const runId = await createCompletedRun();
+
+    await page.goto(`/runs?id=${runId}`);
+
+    // Wait for the run detail to fully render.
+    await expect(page.getByTestId("run-detail")).toBeVisible({ timeout: 15000 });
+
+    // The run was created with a SINGLE service ("ci").
+    // There MUST be exactly one exit code element on the page — the tested
+    // service's exit code. If ALL services' exit codes appear, this fails.
+    // Use a regex to match any data-testid starting with "service-exit-code-".
+    const exitCodeElements = page.getByTestId(/^service-exit-code-/);
+    await expect(exitCodeElements).toHaveCount(1, { timeout: 15000 });
+
+    // The single exit code element must correspond to the tested service "ci".
+    await expect(page.getByTestId("service-exit-code-ci")).toBeVisible();
+  });
 });

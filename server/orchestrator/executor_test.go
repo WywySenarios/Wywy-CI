@@ -262,6 +262,94 @@ func TestDetachedRunnerRunWithFailure(t *testing.T) {
 	}
 }
 
+// findRepoRoot walks up from the working directory to find the repo root (where go.mod lives).
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("reached filesystem root without finding go.mod")
+		}
+		dir = parent
+	}
+}
+
+// TestCITestRunnerRunsPlaywrightE2E verifies that the CI's own test runner
+// script (scripts/tests/test.sh) runs Playwright E2E tests. Without this, the
+// Astro E2E tests (tests/e2e/) are never executed in CI — they pass locally
+// with `npx playwright test` but are invisible to the pipeline.
+func TestCITestRunnerRunsPlaywrightE2E(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "tests", "test.sh")
+
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read test runner script at %s: %v", scriptPath, err)
+	}
+	script := string(content)
+
+	// The runner script must invoke Playwright E2E tests via a dedicated function.
+	if !strings.Contains(script, "run_playwright") && !strings.Contains(script, "playwright test") {
+		t.Error("test runner script (scripts/tests/test.sh) must include a call to run Playwright E2E tests; " +
+			"expected a run_playwright_e2e function that invokes 'npx playwright test'")
+	}
+
+	// The runner script must report Playwright E2E results in results.jsonl.
+	if !strings.Contains(script, "playwright-e2e") {
+		t.Error("test runner script must write a 'playwright-e2e' entry to results.jsonl " +
+			"so the CI runner can ingest the result")
+	}
+}
+
+// TestAgenticTestScriptRunsRealTests verifies that the agentic service's test
+// runner script (Wywy-Codes/scripts/tests/test.sh) actually executes real test
+// suites rather than just reporting a compliance pass. The current script is a
+// no-op placeholder that writes {"name":"compliance","status":"passed"} without
+// running pytest, vitest, playwright, or any other test framework — meaning the
+// CI pipeline reports "passed" for agentic without testing anything.
+func TestAgenticTestScriptRunsRealTests(t *testing.T) {
+	const reposBasePath = "/usr/local/Wywy-Website"
+	scriptPath := filepath.Join(reposBasePath, "Wywy-Codes", "scripts", "tests", "test.sh")
+
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read agentic test script at %s: %v", scriptPath, err)
+	}
+	script := string(content)
+
+	// The script must reference at least one real test framework or runner.
+	// Acceptable indicators: pytest, django (via manage.py test), vitest,
+	// playwright, docker-compose (runs test containers), or "go test".
+	hasRealTestRunner := strings.Contains(script, "pytest") ||
+		strings.Contains(script, "docker-compose") ||
+		strings.Contains(script, "docker compose") ||
+		strings.Contains(script, "vitest") ||
+		strings.Contains(script, "playwright") ||
+		strings.Contains(script, "manage.py test")
+	if !hasRealTestRunner {
+		t.Error("agentic test script (Wywy-Codes/scripts/tests/test.sh) must invoke a real test runner " +
+			"(e.g., pytest, docker compose, vitest, playwright); " +
+			"currently it only writes a compliance pass without running any tests")
+	}
+
+	// The script must report meaningful test suite results, not just "compliance".
+	if !strings.Contains(script, `"name":"django-tests"`) &&
+		!strings.Contains(script, `"name":"astro-tests"`) &&
+		!strings.Contains(script, `"name":"agentic-tests"`) &&
+		!strings.Contains(script, `"name":"python-tests"`) {
+		t.Error("agentic test script must write named test suite results to results.jsonl " +
+			"(e.g., {\"name\":\"django-tests\",\"status\":\"...\"}); " +
+			`currently it only writes {"name":"compliance","status":"passed"}`)
+	}
+}
+
 // TestAllServiceScriptsExistAndAreCompliant reads the production services.txt,
 // resolves each service's "test" suite script, and verifies every script is
 // compliant with the CI runner contract:

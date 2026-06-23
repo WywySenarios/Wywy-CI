@@ -122,10 +122,16 @@ func (s *Store) GetRunService(runID, serviceName string) (*RunService, error) {
 	return rs, nil
 }
 
-// ListActiveRunServices returns distinct service names from runs with status "running".
-func (s *Store) ListActiveRunServices() ([]string, error) {
+// ActiveServiceSuite holds the service name and suite for an active run.
+type ActiveServiceSuite struct {
+	ServiceName string
+	Suite       string
+}
+
+// ListActiveRunServices returns service+suite pairs from runs with status "running".
+func (s *Store) ListActiveRunServices() ([]ActiveServiceSuite, error) {
 	rows, err := s.db.Query(
-		`SELECT DISTINCT rs.service_name
+		`SELECT rs.service_name, rs.suite
 		 FROM runs r
 		 JOIN run_services rs ON r.id = rs.run_id
 		 WHERE r.status = 'running'`,
@@ -135,18 +141,19 @@ func (s *Store) ListActiveRunServices() ([]string, error) {
 	}
 	defer rows.Close()
 
-	var services []string
+	var results []ActiveServiceSuite
 	for rows.Next() {
 		var svc string
-		if err := rows.Scan(&svc); err != nil {
+		var suite string
+		if err := rows.Scan(&svc, &suite); err != nil {
 			return nil, fmt.Errorf("scan active service: %w", err)
 		}
-		services = append(services, svc)
+		results = append(results, ActiveServiceSuite{ServiceName: svc, Suite: suite})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
-	return services, nil
+	return results, nil
 }
 
 // ListRunServices returns all run_service records for a given run.

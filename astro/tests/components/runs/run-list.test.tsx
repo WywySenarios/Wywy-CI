@@ -5,6 +5,7 @@ import { RunList } from "@/components/runs/RunList";
 // Mock useServiceStatus so RunTestsBar (added in GREEN) doesn't open a real WS.
 vi.mock("@/hooks/useServiceStatus", () => ({
   useServiceStatus: vi.fn(() => ({
+    suiteStatus: {},
     serviceStatus: {},
     connected: true,
     error: null,
@@ -131,8 +132,8 @@ describe("RunList", () => {
       { id: "run-abc", status: "success", created_at: "2024-01-01T00:00:00Z" },
     ];
     const services = [
-      { name: "ci", repo: "Wywy-CI" },
-      { name: "agentic", repo: "Wywy-Codes" },
+      { name: "ci", repo: "Wywy-CI", suites: ["test", "e2e"] },
+      { name: "agentic", repo: "Wywy-Codes", suites: ["test"] },
     ];
 
     vi.spyOn(globalThis, "fetch")

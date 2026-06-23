@@ -52,6 +52,8 @@ export function useRunStream(
 
     ws.addEventListener("message", (event: MessageEvent) => {
       try {
+        // type assertion: JSON.parse returns unknown; the try/catch guards
+        // against malformed JSON or unexpected shapes, which are silently ignored.
         const msg = JSON.parse(event.data) as LogMessage;
         if (msg.type === "done") {
           setDone(true);
