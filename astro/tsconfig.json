@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
+    "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
