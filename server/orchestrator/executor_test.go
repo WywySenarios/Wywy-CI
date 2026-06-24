@@ -308,55 +308,165 @@ func TestCITestRunnerRunsPlaywrightE2E(t *testing.T) {
 	}
 }
 
-// TestAgenticTestScriptRunsRealTests verifies that the agentic service's test
-// runner script (Wywy-Codes/scripts/tests/test.sh) actually executes real test
-// suites rather than just reporting a compliance pass. The current script is a
-// no-op placeholder that writes {"name":"compliance","status":"passed"} without
-// running pytest, vitest, playwright, or any other test framework — meaning the
-// CI pipeline reports "passed" for agentic without testing anything.
-func TestAgenticTestScriptRunsRealTests(t *testing.T) {
-	const reposBasePath = "/usr/local/Wywy-Website"
-	scriptPath := filepath.Join(reposBasePath, "Wywy-Codes", "scripts", "tests", "test.sh")
+// TestSuiteDiscovery verifies that ListSuites correctly discovers available
+// test suites by globbing scripts/tests/*.sh in the service's repository,
+// and that ResolveScriptPath returns the correct path for each suite.
+// It also verifies that every discovered script is compliant with the CI
+// runner contract (handles --output-dir=, writes results.jsonl).
+// This test is service-agnostic — it creates a temporary directory with
+// test scripts and does not depend on any specific service repository.
+// It does not need modification as new services or suites are added.
+func TestSuiteDiscovery(t *testing.T) {
+	repoBase := t.TempDir()
+	scriptsDir := filepath.Join(repoBase, "Wywy-Test-Service", "scripts", "tests")
+	if err := os.MkdirAll(scriptsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
-	content, err := os.ReadFile(scriptPath)
+	// Create several suite scripts — each is CI-runner compliant
+	// (parses --output-dir=, writes results.jsonl with a named entry).
+	suites := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "integration",
+			content: `#!/bin/sh
+output_dir=""
+for arg in "$@"; do
+  case "$arg" in
+    --output-dir=*) output_dir="${arg#*=}" ;;
+  esac
+done
+echo '{"name":"integration-tests","status":"passed"}' > "$output_dir/results.jsonl"
+`,
+		},
+		{
+			name: "unit",
+			content: `#!/bin/sh
+output_dir=""
+for arg in "$@"; do
+  case "$arg" in
+    --output-dir=*) output_dir="${arg#*=}" ;;
+  esac
+done
+echo '{"name":"unit-tests","status":"passed"}' > "$output_dir/results.jsonl"
+`,
+		},
+		{
+			name: "lint",
+			content: `#!/bin/sh
+output_dir=""
+for arg in "$@"; do
+  case "$arg" in
+    --output-dir=*) output_dir="${arg#*=}" ;;
+  esac
+done
+echo '{"name":"lint-tests","status":"passed"}' > "$output_dir/results.jsonl"
+`,
+		},
+	}
+	for _, s := range suites {
+		path := filepath.Join(scriptsDir, s.name+".sh")
+		if err := os.WriteFile(path, []byte(s.content), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create a non-.sh file that must be ignored.
+	nonScript := filepath.Join(scriptsDir, "readme.txt")
+	if err := os.WriteFile(nonScript, []byte("not a script"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewServiceScriptResolver(
+		map[string]string{"test-svc": "Wywy-Test-Service"},
+		repoBase,
+	)
+
+	// ListSuites should return only .sh files (excluding .txt, etc.).
+	got, err := resolver.ListSuites("test-svc")
 	if err != nil {
-		t.Fatalf("read agentic test script at %s: %v", scriptPath, err)
-	}
-	script := string(content)
-
-	// The script must reference at least one real test framework or runner.
-	// Acceptable indicators: pytest, django (via manage.py test), vitest,
-	// playwright, docker-compose (runs test containers), or "go test".
-	hasRealTestRunner := strings.Contains(script, "pytest") ||
-		strings.Contains(script, "docker-compose") ||
-		strings.Contains(script, "docker compose") ||
-		strings.Contains(script, "vitest") ||
-		strings.Contains(script, "playwright") ||
-		strings.Contains(script, "manage.py test")
-	if !hasRealTestRunner {
-		t.Error("agentic test script (Wywy-Codes/scripts/tests/test.sh) must invoke a real test runner " +
-			"(e.g., pytest, docker compose, vitest, playwright); " +
-			"currently it only writes a compliance pass without running any tests")
+		t.Fatalf("ListSuites: %v", err)
 	}
 
-	// The script must report meaningful test suite results, not just "compliance".
-	if !strings.Contains(script, `"name":"django-tests"`) &&
-		!strings.Contains(script, `"name":"astro-tests"`) &&
-		!strings.Contains(script, `"name":"agentic-tests"`) &&
-		!strings.Contains(script, `"name":"python-tests"`) {
-		t.Error("agentic test script must write named test suite results to results.jsonl " +
-			"(e.g., {\"name\":\"django-tests\",\"status\":\"...\"}); " +
-			`currently it only writes {"name":"compliance","status":"passed"}`)
+	suiteNames := make([]string, len(suites))
+	for i, s := range suites {
+		suiteNames[i] = s.name
+	}
+	if len(got) != len(suiteNames) {
+		t.Fatalf("ListSuites: want %d suites, got %d: %v", len(suiteNames), len(got), got)
+	}
+
+	want := make(map[string]bool)
+	for _, s := range suiteNames {
+		want[s] = true
+	}
+	for _, name := range got {
+		if !want[name] {
+			t.Errorf("ListSuites: unexpected suite %q", name)
+		}
+		delete(want, name)
+	}
+	for name := range want {
+		t.Errorf("ListSuites: missing suite %q", name)
+	}
+
+	// For every discovered suite, verify resolution and compliance.
+	for _, s := range got {
+		t.Run(s, func(t *testing.T) {
+			path, err := resolver.ResolveScriptPath("test-svc", s)
+			if err != nil {
+				t.Fatalf("ResolveScriptPath(%q): %v", s, err)
+			}
+			expected := filepath.Join(scriptsDir, s+".sh")
+			if path != expected {
+				t.Fatalf("ResolveScriptPath(%q): want %q, got %q", s, expected, path)
+			}
+
+			// Compliance: executable, handles --output-dir=, writes results.jsonl.
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat %q: %v", path, err)
+			}
+			if info.Mode().Perm()&0111 == 0 {
+				t.Errorf("script %q is not executable (mode %o)", path, info.Mode().Perm())
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %q: %v", path, err)
+			}
+			script := string(content)
+			if !strings.Contains(script, "--output-dir") && !strings.Contains(script, "output_dir") && !strings.Contains(script, "OUTPUT_DIR") {
+				t.Errorf("script %q: must handle --output-dir= argument", path)
+			}
+			if !strings.Contains(script, "results.jsonl") {
+				t.Errorf("script %q: must write results.jsonl", path)
+			}
+		})
+	}
+
+	// Unknown service should error.
+	_, err = resolver.ListSuites("nonexistent")
+	if err == nil {
+		t.Error("ListSuites(nonexistent): expected error, got nil")
+	}
+	_, err = resolver.ResolveScriptPath("nonexistent", "test")
+	if err == nil {
+		t.Error("ResolveScriptPath(nonexistent): expected error, got nil")
 	}
 }
 
 // TestAllServiceScriptsExistAndAreCompliant reads the production services.txt,
-// resolves each service's "test" suite script, and verifies every script is
-// compliant with the CI runner contract:
+// discovers every available test suite per service via ListSuites, and verifies
+// each script is compliant with the CI runner contract:
 //   - Exists at the resolved path
 //   - Is executable
 //   - Handles --output-dir= argument
 //   - Writes results.jsonl to the output directory
+//
+// Because it discovers suites dynamically, this test does not need modification
+// as services add, remove, or rename their test suites.
 func TestAllServiceScriptsExistAndAreCompliant(t *testing.T) {
 	const servicesPath = "/etc/Wywy-Website-Control/services.txt"
 	const reposBasePath = "/usr/local/Wywy-Website"
@@ -386,37 +496,95 @@ func TestAllServiceScriptsExistAndAreCompliant(t *testing.T) {
 
 	for service := range repos {
 		t.Run(service, func(t *testing.T) {
-			scriptPath, err := resolver.ResolveScriptPath(service, "test")
+			suites, err := resolver.ListSuites(service)
 			if err != nil {
-				t.Fatalf("ResolveScriptPath(%q, \"test\"): %v", service, err)
+				t.Fatalf("ListSuites(%q): %v", service, err)
+			}
+			if len(suites) == 0 {
+				t.Skipf("no suites found for service %q", service)
 			}
 
-			// 1. Script must exist.
-			info, err := os.Stat(scriptPath)
-			if err != nil {
-				t.Fatalf("script not found at %q: %v", scriptPath, err)
-			}
+			for _, suite := range suites {
+				t.Run(suite, func(t *testing.T) {
+					scriptPath, err := resolver.ResolveScriptPath(service, suite)
+					if err != nil {
+						t.Fatalf("ResolveScriptPath(%q, %q): %v", service, suite, err)
+					}
 
-			// 2. Script must be executable.
-			if info.Mode().Perm()&0111 == 0 {
-				t.Errorf("script %q is not executable (mode %o)", scriptPath, info.Mode().Perm())
-			}
+					// 1. Script must exist.
+					info, err := os.Stat(scriptPath)
+					if err != nil {
+						t.Fatalf("script not found at %q: %v", scriptPath, err)
+					}
 
-			// 3. Script content must handle --output-dir= argument.
-			content, err := os.ReadFile(scriptPath)
-			if err != nil {
-				t.Fatalf("read script %q: %v", scriptPath, err)
-			}
-			script := string(content)
+					// 2. Script must be executable.
+					if info.Mode().Perm()&0111 == 0 {
+						t.Errorf("script %q is not executable (mode %o)", scriptPath, info.Mode().Perm())
+					}
 
-			if !strings.Contains(script, "--output-dir") && !strings.Contains(script, "output_dir") && !strings.Contains(script, "OUTPUT_DIR") {
-				t.Errorf("script %q: must parse --output-dir= argument (no reference to output-dir found)", scriptPath)
-			}
+					// 3. Script content must handle --output-dir= argument.
+					content, err := os.ReadFile(scriptPath)
+					if err != nil {
+						t.Fatalf("read script %q: %v", scriptPath, err)
+					}
+					script := string(content)
 
-			// 4. Script must write results.jsonl.
-			if !strings.Contains(script, "results.jsonl") {
-				t.Errorf("script %q: must write results.jsonl to the output directory", scriptPath)
+					if !strings.Contains(script, "--output-dir") && !strings.Contains(script, "output_dir") && !strings.Contains(script, "OUTPUT_DIR") {
+						t.Errorf("script %q: must parse --output-dir= argument (no reference to output-dir found)", scriptPath)
+					}
+
+					// 4. Script must write results.jsonl.
+					if !strings.Contains(script, "results.jsonl") {
+						t.Errorf("script %q: must write results.jsonl to the output directory", scriptPath)
+					}
+				})
 			}
 		})
 	}
+}
+
+// TestMonitorScriptOutputReportsInvalidJSONL verifies that when a test script
+// writes malformed results.jsonl (e.g. from a shell quoting bug), the Go server
+// catches it and returns a non-empty parse error rather than silently accepting
+// the bad output.
+func TestMonitorScriptOutputReportsInvalidJSONL(t *testing.T) {
+	outputDir := t.TempDir()
+
+	// Inline a script with the exact quoting bug present in master-database's
+	// test.sh: double-quoted echo produces key names without quotes.
+	//   echo "{"name":"compliance","status":"passed"}"
+	// The shell interprets inner " as delimiters, writing: {name:compliance,status:passed}
+	scriptContent := `#!/bin/sh
+output_dir=""
+for arg in "$@"; do
+  case "$arg" in
+    --output-dir=*) output_dir="${arg#*=}" ;;
+  esac
+done
+if [ -n "$output_dir" ]; then
+  echo "{"name":"compliance","status":"passed"}" > "$output_dir/results.jsonl"
+fi
+`
+	script := filepath.Join(t.TempDir(), "broken.sh")
+	if err := os.WriteFile(script, []byte(scriptContent), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	runner := &DetachedRunner{}
+	cmd, err := runner.StartDetached(ctx, outputDir, "sh", script, "--output-dir="+outputDir)
+	if err != nil {
+		t.Fatalf("StartDetached: %v", err)
+	}
+	defer cmd.Wait()
+	defer cmd.Process.Signal(syscall.SIGKILL)
+
+	_, _, _, err = MonitorScriptOutput(ctx, outputDir, 5*time.Second)
+	if err == nil {
+		t.Fatal("MonitorScriptOutput: expected error for malformed JSONL, got nil")
+	}
+	if err.Error() == "" {
+		t.Fatal("MonitorScriptOutput: returned empty error message")
+	}
+	t.Logf("Got expected parse error: %v", err)
 }

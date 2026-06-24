@@ -170,6 +170,14 @@ func (r *Runner) executeDetached(ctx context.Context, dr DetachedCommandRunner, 
 		if ctx.Err() != nil {
 			return -1, "cancelled"
 		}
+		_ = r.store.InsertLogEntries([]store.LogEntry{{
+			RunID:       runID,
+			ServiceName: serviceName,
+			LineNumber:  0,
+			Timestamp:   timestamp(),
+			Level:       "ERROR",
+			Content:     fmt.Sprintf("Failed to parse results.jsonl: %v", err),
+		}})
 		return 1, "failed"
 	}
 

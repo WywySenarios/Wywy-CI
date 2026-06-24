@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestParseResultsJSONLErrors(t *testing.T) {
 		t.Errorf("blank lines: want 0 entries, got %d", len(entries))
 	}
 
-	// 3) Invalid JSON on one line → skip that line, continue parsing others.
+	// 3) Invalid JSON on one line → return error with the bad text.
 	mixedPath := filepath.Join(dir, "mixed.jsonl")
 	mixedContent := `{"name": "TestFoo", "status": "passed"}
 not-json
@@ -92,23 +93,45 @@ not-json
 	if err := os.WriteFile(mixedPath, []byte(mixedContent), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	entries, err = ParseResultsJSONL(mixedPath)
-	if err != nil {
-		t.Fatalf("mixed file should not error when skipping bad line, got %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("mixed file: want 2 entries, got %d", len(entries))
-	}
-	if entries[0].Name != "TestFoo" || entries[0].Status != "passed" {
-		t.Errorf("entries[0]: want TestFoo/passed, got %s/%s", entries[0].Name, entries[0].Status)
-	}
-	if entries[1].Name != "TestBar" || entries[1].Status != "failed" {
-		t.Errorf("entries[1]: want TestBar/failed, got %s/%s", entries[1].Name, entries[1].Status)
+	_, err = ParseResultsJSONL(mixedPath)
+	if err == nil {
+		t.Error("mixed file with invalid JSON should return error, got nil")
+	} else if !strings.Contains(err.Error(), "not-json") {
+		t.Errorf("error should contain the bad line text %q; got: %v", "not-json", err)
 	}
 
 	// 4) Missing file → return error.
 	_, err = ParseResultsJSONL(filepath.Join(dir, "nonexistent.jsonl"))
 	if err == nil {
 		t.Error("missing file should return error, got nil")
+	}
+}
+
+// TestParseResultsJSONLRejectsMalformedLines verifies that ParseResultsJSONL
+// does NOT silently skip malformed JSON — it must return an error containing
+// the defective line text so the CI runner can fail the run and surface the
+// problem to the user instead of producing a false-positive "passed" status.
+func TestParseResultsJSONLRejectsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+
+	// A file with a valid line followed by garbage followed by another valid line.
+	badLine := "this is not json at all"
+	path := filepath.Join(dir, "bad.jsonl")
+	content := `{"name": "good", "status": "passed"}
+` + badLine + `
+{"name": "also-good", "status": "passed"}
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := ParseResultsJSONL(path)
+	if err == nil {
+		t.Fatal("expected error for malformed JSONL line, got nil")
+	}
+
+	// The error message must contain the exact defective text.
+	if !strings.Contains(err.Error(), badLine) {
+		t.Errorf("error should contain the bad line text %q; got: %v", badLine, err)
 	}
 }

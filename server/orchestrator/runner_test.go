@@ -419,3 +419,77 @@ echo '{"name":"t1","status":"passed"}' > "$output_dir/results.jsonl"
 	}
 }
 
+// TestRunnerLogsMalformedJSONLError verifies that when a test script writes
+// malformed results.jsonl (e.g. from a shell quoting bug), the parse error is
+// captured as a log entry so the user can diagnose the issue.
+func TestRunnerLogsMalformedJSONLError(t *testing.T) {
+	s := newTestStore(t)
+	runsDir := t.TempDir()
+
+	// Create a script with the classic double-quote quoting bug:
+	//   echo "{"name":"compliance","status":"passed"}"
+	// Shell interprets inner " as delimiters, writing: {name:compliance,status:passed}
+	repoBase := t.TempDir()
+	scriptPath := filepath.Join(repoBase, "Wywy-Agentic", "scripts", "tests", "test.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptContent := `#!/bin/sh
+output_dir=""
+for arg in "$@"; do
+  case "$arg" in
+    --output-dir=*) output_dir="${arg#*=}" ;;
+  esac
+done
+if [ -n "$output_dir" ]; then
+  echo "{"name":"compliance","status":"passed"}" > "$output_dir/results.jsonl"
+fi
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewServiceScriptResolver(
+		map[string]string{"agentic": "Wywy-Agentic"},
+		repoBase,
+	)
+
+	r := NewRunner(s, DefaultRunner)
+	r.RunsDir = runsDir
+	r.SetResolver(resolver)
+
+	ctx := context.Background()
+	run, err := r.StartRun(ctx, []string{"agentic"}, "test")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	final := runPoller(t, s, run.ID)
+	if final.Status != "failed" {
+		t.Errorf("run Status: want failed, got %q", final.Status)
+	}
+
+	// The parse error describing the malformed JSON must be in the log entries.
+	logs, err := s.QueryAllLogEntries(run.ID, store.LogQueryOpts{})
+	if err != nil {
+		t.Fatalf("QueryAllLogEntries: %v", err)
+	}
+
+	found := false
+	for _, e := range logs {
+		if strings.Contains(e.Content, "invalid result entry") ||
+			strings.Contains(e.Content, "{name:compliance") ||
+			strings.Contains(e.Content, "malformed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected log entry containing the parse error detail; got %d entries:\n", len(logs))
+		for _, e := range logs {
+			t.Errorf("  [%s] %s", e.Level, e.Content)
+		}
+	}
+}
+

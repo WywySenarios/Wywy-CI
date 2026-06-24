@@ -21,14 +21,14 @@ func ParseResultsJSONL(filepath string) ([]ResultEntry, error) {
 	}
 
 	var entries []ResultEntry
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
 		var entry ResultEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			return nil, fmt.Errorf("invalid result entry on line %d: %q", i+1, line)
 		}
 		entries = append(entries, entry)
 	}
