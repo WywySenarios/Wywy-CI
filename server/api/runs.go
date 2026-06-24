@@ -54,11 +54,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Service represents a monitored service from services.txt.
 type Service struct {
-	Name     string   `json:"name"`
-	Repo     string   `json:"repo"`
-	Port     int      `json:"port"`
-	Suites   []string `json:"suites"`
-	DenyList []string `json:"deny_list"`
+	Name   string   `json:"name"`
+	Repo   string   `json:"repo"`
+	Port   int      `json:"port"`
+	Suites []string `json:"suites"`
 }
 
 func (h *Handler) handleListServices(w http.ResponseWriter, r *http.Request) {
@@ -90,11 +89,6 @@ func (h *Handler) handleListServices(w http.ResponseWriter, r *http.Request) {
 			suites, listErr := h.Runner.ListSuites(svc.Name)
 			if listErr == nil && len(suites) > 0 {
 				svc.Suites = suites
-			}
-		}
-		if denied, ok := DenyList[svc.Name]; ok {
-			for suite := range denied {
-				svc.DenyList = append(svc.DenyList, suite)
 			}
 		}
 		services = append(services, svc)

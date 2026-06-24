@@ -488,49 +488,6 @@ describe("RunTestsBar", () => {
     );
   }, 10000);
 
-  // ── denyList ────────────────────────────────────────────────────
-
-  it("excludes denied suites from 'All tests' using deny_list from the backend response", async () => {
-    const services = [
-      {
-        name: "agentic",
-        repo: "Wywy-Codes",
-        suites: ["test", "update-screenshots"],
-        deny_list: ["update-screenshots"],
-      },
-    ];
-
-    const mockFetch = vi.fn();
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve(services),
-    });
-    const pendingPromise = new Promise(() => {});
-    mockFetch.mockImplementation(() => pendingPromise);
-    globalThis.fetch = mockFetch;
-
-    render(<RunTestsBar />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("service-trigger-agentic"),
-      ).toBeInTheDocument();
-    });
-
-    await userEvent.click(screen.getByTestId("service-trigger-agentic"));
-    await userEvent.click(screen.getByTestId("run-all-agentic"));
-
-    await waitFor(() => {
-      // 1 GET /api/services + 1 POST /api/runs (only "test", not "update-screenshots")
-      expect(mockFetch).toHaveBeenCalledTimes(2);
-    });
-
-    // The single POST must be for suite "test".
-    expect(mockFetch.mock.calls[1][1].body).toContain('"suite":"test"');
-    // The denied suite must NOT be triggered.
-    expect(mockFetch.mock.calls[1][1].body).not.toContain("update-screenshots");
-  });
-
   // ── apiBase ────────────────────────────────────────────────────
 
   it("forwards apiBase to useServiceStatus and fetch", async () => {
