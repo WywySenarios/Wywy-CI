@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 
+	"wywy-website/ci/apps/mcp"
 	"wywy-website/ci/server/api"
 	"wywy-website/ci/server/orchestrator"
 	"wywy-website/ci/server/store"
@@ -54,6 +56,23 @@ func main() {
 		Broadcaster:      broadcaster,
 		EventBroadcaster: eventBroadcaster,
 	}
+
+	// Start MCP server in a goroutine.
+	mcpSrv := mcp.NewMCPServer("Wywy-CI", "1.0.0")
+	if err := mcpSrv.RegisterDefaults(); err != nil {
+		log.Fatalf("MCP server registration failed: %v", err)
+	}
+	mcpTransport := mcp.NewTransport(mcpSrv.HTTPHandler())
+	go func() {
+		lis, err := net.Listen("tcp", mcpTransport.Addr)
+		if err != nil {
+			log.Fatalf("MCP server failed to listen on %s: %v", mcpTransport.Addr, err)
+		}
+		log.Printf("Wywy-CI MCP server listening on %s", mcpTransport.Addr)
+		if err := mcpTransport.Serve(lis); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("MCP server error: %v", err)
+		}
+	}()
 
 	// Register routes and wrap with CORS.
 	mux := http.NewServeMux()
