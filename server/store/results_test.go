@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,5 +134,130 @@ func TestParseResultsJSONLRejectsMalformedLines(t *testing.T) {
 	// The error message must contain the exact defective text.
 	if !strings.Contains(err.Error(), badLine) {
 		t.Errorf("error should contain the bad line text %q; got: %v", badLine, err)
+	}
+}
+
+// TestParseResultsJSONLEnrichedDirect verifies that ParseResultsJSONL directly
+// fills struct fields (Passed, Failed, Skipped, Total, Duration) when parsing
+// enriched results.jsonl that contains count fields.
+func TestParseResultsJSONLEnrichedDirect(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "results.jsonl")
+
+	content := `{"name": "TestFoo", "status": "passed", "passed": 5, "failed": 2, "skipped": 1, "total": 8, "duration": 1.23}
+`
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entries, err := ParseResultsJSONL(filePath)
+	if err != nil {
+		t.Fatalf("ParseResultsJSONL: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	if entries[0].Passed != 5 {
+		t.Errorf("Passed: want 5, got %d", entries[0].Passed)
+	}
+	if entries[0].Failed != 2 {
+		t.Errorf("Failed: want 2, got %d", entries[0].Failed)
+	}
+	if entries[0].Skipped != 1 {
+		t.Errorf("Skipped: want 1, got %d", entries[0].Skipped)
+	}
+	if entries[0].Total != 8 {
+		t.Errorf("Total: want 8, got %d", entries[0].Total)
+	}
+	if entries[0].Duration != 1.23 {
+		t.Errorf("Duration: want 1.23, got %f", entries[0].Duration)
+	}
+}
+
+// TestParseResultsJSONLLegacyWithoutCounts verifies that ParseResultsJSONL
+// handles legacy JSONL without count fields — missing fields must default to
+// zero rather than causing a parse error.
+func TestParseResultsJSONLLegacyWithoutCounts(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "results.jsonl")
+
+	// Old-format JSONL without count fields.
+	content := `{"name": "TestFoo", "status": "passed"}
+{"name": "TestBar", "status": "failed"}
+`
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entries, err := ParseResultsJSONL(filePath)
+	if err != nil {
+		t.Fatalf("ParseResultsJSONL: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+
+	// All count fields should default to zero.
+	for i, entry := range entries {
+		if entry.Passed != 0 {
+			t.Errorf("entries[%d].Passed: want 0, got %d", i, entry.Passed)
+		}
+		if entry.Failed != 0 {
+			t.Errorf("entries[%d].Failed: want 0, got %d", i, entry.Failed)
+		}
+		if entry.Skipped != 0 {
+			t.Errorf("entries[%d].Skipped: want 0, got %d", i, entry.Skipped)
+		}
+		if entry.Total != 0 {
+			t.Errorf("entries[%d].Total: want 0, got %d", i, entry.Total)
+		}
+		if entry.Duration != 0.0 {
+			t.Errorf("entries[%d].Duration: want 0.0, got %f", i, entry.Duration)
+		}
+	}
+}
+
+// TestParseResultsJSONLWithCountFields verifies that ResultEntry parses
+// count fields (passed, failed, skipped, total, duration) from an enriched
+// results.jsonl file. This test will fail until the ResultEntry struct gains
+// these fields.
+func TestParseResultsJSONLWithCountFields(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "results.jsonl")
+
+	// Write an enriched JSONL line with all count fields.
+	content := `{"name": "TestFoo", "status": "passed", "passed": 5, "failed": 2, "skipped": 1, "total": 8, "duration": 1.23}
+`
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entries, err := ParseResultsJSONL(filePath)
+	if err != nil {
+		t.Fatalf("ParseResultsJSONL: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	// Marshal back to JSON and verify count fields survived the round-trip.
+	data, err := json.Marshal(entries[0])
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	got := string(data)
+
+	// Each count field should be present in the marshaled output.
+	for _, want := range []string{
+		`"passed":5`,
+		`"failed":2`,
+		`"skipped":1`,
+		`"total":8`,
+		`"duration":1.23`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marshaled JSON should contain %s; got: %s", want, got)
+		}
 	}
 }

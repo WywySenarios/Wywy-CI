@@ -1,36 +1,42 @@
 package store
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"strings"
+	"wywy-website/ci/apps/testrunner"
 )
 
 // ResultEntry represents a single test result from a results.jsonl file.
 type ResultEntry struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	Name     string  `json:"name"`
+	Status   string  `json:"status"`
+	Passed   int     `json:"passed"`
+	Failed   int     `json:"failed"`
+	Skipped  int     `json:"skipped"`
+	Total    int     `json:"total"`
+	Duration float64 `json:"duration"`
 }
 
 // ParseResultsJSONL reads a results.jsonl file and returns the parsed entries.
-func ParseResultsJSONL(filepath string) ([]ResultEntry, error) {
-	data, err := os.ReadFile(filepath)
+func ParseResultsJSONL(path string) ([]ResultEntry, error) {
+	results, err := testrunner.ParseResultsJSONL(path)
 	if err != nil {
-		return nil, fmt.Errorf("read results file: %w", err)
+		return nil, err
 	}
+	return TestResultsToEntries(results), nil
+}
 
-	var entries []ResultEntry
-	for i, raw := range strings.Split(string(data), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" {
-			continue
+// TestResultsToEntries converts testrunner TestResult values to store ResultEntry values.
+func TestResultsToEntries(results []testrunner.TestResult) []ResultEntry {
+	entries := make([]ResultEntry, len(results))
+	for i, tr := range results {
+		entries[i] = ResultEntry{
+			Name:     tr.Name,
+			Status:   tr.Status,
+			Passed:   tr.Passed,
+			Failed:   tr.Failed,
+			Skipped:  tr.Skipped,
+			Total:    tr.Total,
+			Duration: tr.Duration,
 		}
-		var entry ResultEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			return nil, fmt.Errorf("invalid result entry on line %d: %q", i+1, line)
-		}
-		entries = append(entries, entry)
 	}
-	return entries, nil
+	return entries
 }

@@ -12,6 +12,9 @@ type Run struct {
 	CreatedAt  string `json:"created_at"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	Status     string `json:"status"`
+	Passed     int    `json:"passed"`
+	Failed     int    `json:"failed"`
+	Skipped    int    `json:"skipped"`
 }
 
 // CreateRun inserts a new run into the database.
@@ -29,7 +32,14 @@ func (s *Store) CreateRun(run *Run) error {
 // GetRun retrieves a run by its ID. Returns the error if not found.
 func (s *Store) GetRun(id string) (*Run, error) {
 	row := s.db.QueryRow(
-		`SELECT id, created_at, finished_at, status FROM runs WHERE id = ?`, id,
+		`SELECT r.id, r.created_at, r.finished_at, r.status,
+		        COALESCE(SUM(rs.passed), 0),
+		        COALESCE(SUM(rs.failed), 0),
+		        COALESCE(SUM(rs.skipped), 0)
+		 FROM runs r
+		 LEFT JOIN run_services rs ON r.id = rs.run_id
+		 WHERE r.id = ?
+		 GROUP BY r.id`, id,
 	)
 	r, err := scanRun(row)
 	if err != nil {
@@ -43,7 +53,16 @@ func (s *Store) GetRun(id string) (*Run, error) {
 
 // ListRuns returns all runs ordered by created_at descending.
 func (s *Store) ListRuns() ([]Run, error) {
-	rows, err := s.db.Query(`SELECT id, created_at, finished_at, status FROM runs ORDER BY created_at DESC`)
+	rows, err := s.db.Query(
+		`SELECT r.id, r.created_at, r.finished_at, r.status,
+		        COALESCE(SUM(rs.passed), 0),
+		        COALESCE(SUM(rs.failed), 0),
+		        COALESCE(SUM(rs.skipped), 0)
+		 FROM runs r
+		 LEFT JOIN run_services rs ON r.id = rs.run_id
+		 GROUP BY r.id
+		 ORDER BY r.created_at DESC`,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
@@ -72,7 +91,7 @@ type scanner interface {
 func scanRun(s scanner) (*Run, error) {
 	var r Run
 	var finishedAt sql.NullString
-	if err := s.Scan(&r.ID, &r.CreatedAt, &finishedAt, &r.Status); err != nil {
+	if err := s.Scan(&r.ID, &r.CreatedAt, &finishedAt, &r.Status, &r.Passed, &r.Failed, &r.Skipped); err != nil {
 		return nil, err
 	}
 	r.FinishedAt = finishedAt.String
@@ -88,16 +107,20 @@ type RunService struct {
 	ExitCode    *int   `json:"exit_code"`
 	StartTime   string `json:"start_time"`
 	EndTime     string `json:"end_time"`
+	Passed      int    `json:"passed"`
+	Failed      int    `json:"failed"`
+	Skipped     int    `json:"skipped"`
 }
 
 // CreateRunService inserts a new run_service record.
 func (s *Store) CreateRunService(rs *RunService) error {
 	_, err := s.db.Exec(
-		`INSERT INTO run_services (run_id, service_name, suite, status, exit_code, start_time, end_time)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO run_services (run_id, service_name, suite, status, exit_code, start_time, end_time, passed, failed, skipped)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rs.RunID, rs.ServiceName, rs.Suite, rs.Status,
 		nilIfNil(rs.ExitCode),
 		nilIfEmpty(rs.StartTime), nilIfEmpty(rs.EndTime),
+		rs.Passed, rs.Failed, rs.Skipped,
 	)
 	if err != nil {
 		return fmt.Errorf("insert run_service: %w", err)
@@ -108,7 +131,7 @@ func (s *Store) CreateRunService(rs *RunService) error {
 // GetRunService retrieves a run_service by run_id and service_name.
 func (s *Store) GetRunService(runID, serviceName string) (*RunService, error) {
 	row := s.db.QueryRow(
-		`SELECT run_id, service_name, suite, status, exit_code, start_time, end_time
+		`SELECT run_id, service_name, suite, status, exit_code, start_time, end_time, passed, failed, skipped
 		 FROM run_services WHERE run_id = ? AND service_name = ?`,
 		runID, serviceName,
 	)
@@ -159,7 +182,7 @@ func (s *Store) ListActiveRunServices() ([]ActiveServiceSuite, error) {
 // ListRunServices returns all run_service records for a given run.
 func (s *Store) ListRunServices(runID string) ([]RunService, error) {
 	rows, err := s.db.Query(
-		`SELECT run_id, service_name, suite, status, exit_code, start_time, end_time
+		`SELECT run_id, service_name, suite, status, exit_code, start_time, end_time, passed, failed, skipped
 		 FROM run_services WHERE run_id = ?`,
 		runID,
 	)
@@ -350,7 +373,8 @@ func scanRunService(s scanner) (*RunService, error) {
 	var exitCode sql.NullInt64
 	var startTime, endTime sql.NullString
 	if err := s.Scan(&rs.RunID, &rs.ServiceName, &rs.Suite, &rs.Status,
-		&exitCode, &startTime, &endTime); err != nil {
+		&exitCode, &startTime, &endTime,
+		&rs.Passed, &rs.Failed, &rs.Skipped); err != nil {
 		return nil, err
 	}
 	if exitCode.Valid {

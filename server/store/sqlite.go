@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS run_services (
 	exit_code    INTEGER,
 	start_time   TEXT,
 	end_time     TEXT,
+	passed       INTEGER NOT NULL DEFAULT 0,
+	failed       INTEGER NOT NULL DEFAULT 0,
+	skipped      INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (run_id, service_name)
 );
 

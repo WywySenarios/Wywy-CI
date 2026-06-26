@@ -1,8 +1,10 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -465,5 +467,161 @@ func TestOpenCreatesParentDirectories(t *testing.T) {
 	}
 	if tableCount != 3 {
 		t.Errorf("expected 3 tables, got %d", tableCount)
+	}
+}
+
+// TestRunServiceSchemaHasCountColumns verifies that the run_services table
+// has passed, failed, and skipped columns. This test will fail until the
+// migration in sqlite.go adds these columns.
+func TestRunServiceSchemaHasCountColumns(t *testing.T) {
+	s := newTestStore(t)
+
+	rows, err := s.DB().Query("PRAGMA table_info(run_services)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info: %v", err)
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan column: %v", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration: %v", err)
+	}
+
+	for _, col := range []string{"passed", "failed", "skipped"} {
+		if !columns[col] {
+			t.Errorf("run_services table is missing column %q — add it to the migration in sqlite.go", col)
+		}
+	}
+}
+
+// TestCreateAndGetRunServiceWithCounts verifies that RunService count fields
+// (passed, failed, skipped) survive a round-trip through SQLite. This test
+// will fail until the run_services table has count columns and the
+// Store methods INSERT/SELECT them.
+func TestCreateAndGetRunServiceWithCounts(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create the parent run first.
+	if err := s.CreateRun(&Run{ID: "r1", CreatedAt: "2026-06-13T10:00:00Z", Status: "running"}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Attempt to INSERT with count columns via raw SQL.
+	_, err := s.DB().Exec(`
+		INSERT INTO run_services (run_id, service_name, suite, status, passed, failed, skipped)
+		VALUES ('r1', 'agentic', 'test', 'passed', 5, 2, 1)
+	`)
+	if err != nil {
+		t.Fatalf("expected INSERT with count columns to succeed, but got: %v", err)
+	}
+
+	// Verify the values are stored correctly.
+	var passed, failed, skipped int
+	err = s.DB().QueryRow(
+		`SELECT passed, failed, skipped FROM run_services WHERE run_id = 'r1' AND service_name = 'agentic'`,
+	).Scan(&passed, &failed, &skipped)
+	if err != nil {
+		t.Fatalf("expected SELECT of count columns to succeed, but got: %v", err)
+	}
+
+	if passed != 5 {
+		t.Errorf("passed: want 5, got %d", passed)
+	}
+	if failed != 2 {
+		t.Errorf("failed: want 2, got %d", failed)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped: want 1, got %d", skipped)
+	}
+}
+
+// TestGetRunServiceReturnsCountFields verifies that GetRunService returns
+// count fields (passed, failed, skipped) by inserting enriched data via raw
+// SQL, calling GetRunService, and checking JSON output contains the values.
+func TestGetRunServiceReturnsCountFields(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateRun(&Run{ID: "r1", CreatedAt: "2026-06-13T10:00:00Z", Status: "running"}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Insert enriched row via raw SQL (count columns exist from A-I).
+	_, err := s.DB().Exec(`
+		INSERT INTO run_services (run_id, service_name, suite, status, passed, failed, skipped)
+		VALUES ('r1', 'agentic', 'test', 'passed', 5, 2, 1)
+	`)
+	if err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+
+	// GetRunService should return count fields, but currently doesn't.
+	rs, err := s.GetRunService("r1", "agentic")
+	if err != nil {
+		t.Fatalf("GetRunService: %v", err)
+	}
+
+	// Marshal to JSON and verify count fields appear in the output.
+	data, err := json.Marshal(rs)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	got := string(data)
+
+	for _, want := range []string{`"passed":5`, `"failed":2`, `"skipped":1`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("GetRunService JSON should contain %s; got: %s", want, got)
+		}
+	}
+}
+
+// TestListRunServicesReturnsCountFields verifies that ListRunServices returns
+// count fields (passed, failed, skipped). Inserts enriched data via raw SQL,
+// then checks JSON output.
+func TestListRunServicesReturnsCountFields(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateRun(&Run{ID: "r1", CreatedAt: "2026-06-13T10:00:00Z", Status: "running"}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Insert enriched row via raw SQL.
+	_, err := s.DB().Exec(`
+		INSERT INTO run_services (run_id, service_name, suite, status, passed, failed, skipped)
+		VALUES ('r1', 'agentic', 'test', 'passed', 5, 2, 1)
+	`)
+	if err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+
+	svcs, err := s.ListRunServices("r1")
+	if err != nil {
+		t.Fatalf("ListRunServices: %v", err)
+	}
+	if len(svcs) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(svcs))
+	}
+
+	// Marshal to JSON and verify count fields appear in the output.
+	data, err := json.Marshal(svcs[0])
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	got := string(data)
+
+	for _, want := range []string{`"passed":5`, `"failed":2`, `"skipped":1`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ListRunServices JSON should contain %s; got: %s", want, got)
+		}
 	}
 }
