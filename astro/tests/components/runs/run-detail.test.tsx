@@ -49,4 +49,58 @@ describe("RunDetail", () => {
     render(<RunDetail id="run-missing" />);
     expect(await screen.findByText(/not found/i)).toBeInTheDocument();
   });
+
+  it("shows passed/failed/skipped counts for each service", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: "run-abc",
+        status: "failed",
+        created_at: "2026-06-22T00:55:12Z",
+        finished_at: "2026-06-22T00:55:12Z",
+        services: [
+          {
+            run_id: "run-abc",
+            service_name: "ci",
+            suite: "test",
+            status: "failed",
+            exit_code: 1,
+            start_time: "",
+            end_time: "2026-06-22T00:55:12Z",
+            passed: 3,
+            failed: 1,
+            skipped: 0,
+          },
+          {
+            run_id: "run-abc",
+            service_name: "agentic",
+            suite: "test",
+            status: "passed",
+            exit_code: 0,
+            start_time: "",
+            end_time: "2026-06-22T00:54:00Z",
+            passed: 5,
+            failed: 2,
+            skipped: 1,
+          },
+        ],
+      }),
+    } as Response);
+
+    render(<RunDetail id="run-abc" />);
+    expect(await screen.findByTestId("run-detail")).toBeInTheDocument();
+
+    // Each service must display its passed/failed/skipped counts.
+    const ciCounts = screen.getByTestId("service-counts-ci");
+    expect(ciCounts).toBeInTheDocument();
+    expect(ciCounts).toHaveTextContent(/3.*passed/i);
+    expect(ciCounts).toHaveTextContent(/1.*failed/i);
+    expect(ciCounts).toHaveTextContent(/0.*skipped/i);
+
+    const agenticCounts = screen.getByTestId("service-counts-agentic");
+    expect(agenticCounts).toBeInTheDocument();
+    expect(agenticCounts).toHaveTextContent(/5.*passed/i);
+    expect(agenticCounts).toHaveTextContent(/2.*failed/i);
+    expect(agenticCounts).toHaveTextContent(/1.*skipped/i);
+  });
 });

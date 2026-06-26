@@ -19,4 +19,7 @@ export interface RunService {
   exit_code: number | null;
   start_time: string;
   end_time: string;
+  passed: number;
+  failed: number;
+  skipped: number;
 }

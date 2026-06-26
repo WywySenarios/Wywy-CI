@@ -154,6 +154,12 @@ export function RunDetail({ id, apiBase = DEFAULT_API_BASE }: RunDetailProps) {
               >
                 <StatusBadge status={service.status as Status} />
                 <span className="font-mono">{service.service_name}</span>
+                <span
+                  data-testid={`service-counts-${service.service_name}`}
+                  className="text-xs text-muted-foreground"
+                >
+                  {service.passed} passed, {service.failed} failed, {service.skipped} skipped
+                </span>
                 {service.exit_code !== null && (
                   <span
                     data-testid={`service-exit-code-${service.service_name}`}
