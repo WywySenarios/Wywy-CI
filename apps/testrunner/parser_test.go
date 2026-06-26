@@ -7,8 +7,8 @@ import (
 // TestParseFrameworkOutputGoTestJSON verifies that ParseFrameworkOutput parses
 // Go test -json output into structured TestResult entries.
 func TestParseFrameworkOutputGoTestJSON(t *testing.T) {
-	output := `{"Package":"wywy-website/ci/server/store","Test":"TestFoo","Action":"pass"}
-{"Package":"wywy-website/ci/server/store","Test":"TestBar","Action":"fail"}
+	output := `{"Package":"wywy-ci/server/store","Test":"TestFoo","Action":"pass"}
+{"Package":"wywy-ci/server/store","Test":"TestBar","Action":"fail"}
 `
 	results, err := ParseFrameworkOutput(output, FrameworkGoTestJSON)
 	if err != nil {

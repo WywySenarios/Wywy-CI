@@ -8,10 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"wywy-website/ci/apps/mcp"
-	"wywy-website/ci/server/api"
-	"wywy-website/ci/server/orchestrator"
-	"wywy-website/ci/server/store"
+	"wywy-ci/apps/mcp"
+	"wywy-ci/server/api"
+	"wywy-ci/server/orchestrator"
+	"wywy-ci/server/store"
 )
 
 func main() {

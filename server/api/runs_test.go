@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"wywy-website/ci/server/orchestrator"
-	"wywy-website/ci/server/store"
+	"wywy-ci/server/orchestrator"
+	"wywy-ci/server/store"
 
 	"github.com/coder/websocket"
 )

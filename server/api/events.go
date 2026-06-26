@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sync"
 
-	"wywy-website/ci/server/orchestrator"
+	"wywy-ci/server/orchestrator"
 
 	"github.com/coder/websocket"
 )

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"wywy-website/ci/server/orchestrator"
+	"wywy-ci/server/orchestrator"
 )
 
 func TestCORSPreflight(t *testing.T) {

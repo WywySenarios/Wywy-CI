@@ -9,7 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcptest"
 	"github.com/mark3labs/mcp-go/server"
 
-	wywy "wywy-website/ci/apps/mcp"
+	wywy "wywy-ci/apps/mcp"
 )
 
 // toolClient is satisfied by the client returned from mcptest.Server.Client().

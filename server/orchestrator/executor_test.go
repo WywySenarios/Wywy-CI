@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"wywy-website/ci/apps/testrunner"
+	"wywy-ci/apps/testrunner"
 )
 
 func TestResolveScriptPath(t *testing.T) {

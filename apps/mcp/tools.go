@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"wywy-website/ci/apps/testrunner"
+	"wywy-ci/apps/testrunner"
 )
 
 const (

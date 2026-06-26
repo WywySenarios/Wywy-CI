@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
-	"wywy-website/ci/server/orchestrator"
+	"wywy-ci/server/orchestrator"
 )
 
 // Broadcaster manages WebSocket subscriber channels per run.

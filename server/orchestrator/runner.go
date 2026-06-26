@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"wywy-website/ci/apps/testrunner"
-	"wywy-website/ci/server/store"
+	"wywy-ci/apps/testrunner"
+	"wywy-ci/server/store"
 )
 
 // LogMessage represents a log event for broadcast.

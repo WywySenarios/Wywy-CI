@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"wywy-website/ci/apps/testrunner"
+	"wywy-ci/apps/testrunner"
 )
 
 // ServiceScriptResolver resolves script paths from service names.

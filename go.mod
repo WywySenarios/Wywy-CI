@@ -1,4 +1,4 @@
-module wywy-website/ci
+module wywy-ci
 
 go 1.25.5
 

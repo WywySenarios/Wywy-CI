@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"wywy-website/ci/server/orchestrator"
+	"wywy-ci/server/orchestrator"
 )
 
 func TestWebSocketStream(t *testing.T) {

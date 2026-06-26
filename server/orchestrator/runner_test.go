@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"wywy-website/ci/apps/testrunner"
-	"wywy-website/ci/server/store"
+	"wywy-ci/apps/testrunner"
+	"wywy-ci/server/store"
 )
 
 // fakeRunner returns a fixed exit code and output.

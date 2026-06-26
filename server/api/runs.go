@@ -9,9 +9,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"wywy-website/ci/server/orchestrator"
+	"wywy-ci/server/orchestrator"
 
-	"wywy-website/ci/server/store"
+	"wywy-ci/server/store"
 )
 
 // respondJSON writes v as a JSON response with the given status code.

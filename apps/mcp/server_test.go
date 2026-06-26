@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"wywy-website/ci/apps/mcp"
+	"wywy-ci/apps/mcp"
 )
 
 // TestHTTPHandler_ServesOnAddress proves the HTTP+SSE transport handler

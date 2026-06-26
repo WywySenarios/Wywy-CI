@@ -1,7 +1,7 @@
 package store
 
 import (
-	"wywy-website/ci/apps/testrunner"
+	"wywy-ci/apps/testrunner"
 )
 
 // ResultEntry represents a single test result from a results.jsonl file.
