@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"wywy-website/ci/apps/testrunner"
 	"wywy-website/ci/server/store"
 )
 
@@ -105,7 +106,15 @@ func (r *Runner) StartRun(ctx context.Context, services []string, suite string) 
 		}
 	}
 
-	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
+	// Delegate to testrunner for service name validation and run ID generation.
+	if len(services) == 0 {
+		return nil, fmt.Errorf("at least one service is required")
+	}
+	result, err := testrunner.RunTests(services[0], suite)
+	if err != nil {
+		return nil, err
+	}
+	runID := result.ID
 
 	run := &store.Run{
 		ID:        runID,
@@ -156,7 +165,7 @@ func (r *Runner) executeDetached(ctx context.Context, dr DetachedCommandRunner, 
 		return 1, "failed"
 	}
 
-	args := BuildScriptArgs(ScriptInvocation{
+	args := testrunner.BuildScriptArgs(testrunner.ScriptInvocation{
 		RunID:     runID,
 		OutputDir: outputDir,
 	})
@@ -165,7 +174,7 @@ func (r *Runner) executeDetached(ctx context.Context, dr DetachedCommandRunner, 
 		return 1, "failed"
 	}
 
-	results, stdout, stderr, err := MonitorScriptOutput(ctx, outputDir, 30*time.Minute)
+	results, stdout, stderr, err := r.MonitorScriptOutput(ctx, outputDir, 30*time.Minute)
 	if err != nil {
 		if ctx.Err() != nil {
 			return -1, "cancelled"
@@ -186,13 +195,7 @@ func (r *Runner) executeDetached(ctx context.Context, dr DetachedCommandRunner, 
 		r.storeScriptOutput(runID, serviceName, stdout, stderr)
 	}
 
-	// Any non-passed result → service failed.
-	for _, res := range results {
-		if res.Status != "passed" {
-			return 1, "failed"
-		}
-	}
-	return 0, "passed"
+	return r.ComputeOverallStatus(results)
 }
 
 // storeScriptOutput splits captured stdout/stderr into log entries and persists them.
@@ -261,23 +264,15 @@ func (r *Runner) DetectOrphanedRuns() {
 			resultsPath := filepath.Join(r.RunsDir, run.ID, svc.ServiceName, "results.jsonl")
 
 			if _, err := os.Stat(resultsPath); err == nil {
-				entries, parseErr := store.ParseResultsJSONL(resultsPath)
+				results, parseErr := testrunner.ParseResultsJSONL(resultsPath)
 				if parseErr != nil {
 					r.store.UpdateRunService(run.ID, svc.ServiceName, 1, "failed", timestamp())
 					allPassed = false
 					continue
 				}
-				svcPassed := true
-				for _, e := range entries {
-					if e.Status != "passed" {
-						svcPassed = false
-						break
-					}
-				}
-				if svcPassed {
-					r.store.UpdateRunService(run.ID, svc.ServiceName, 0, "passed", timestamp())
-				} else {
-					r.store.UpdateRunService(run.ID, svc.ServiceName, 1, "failed", timestamp())
+				code, status := r.ComputeOverallStatus(store.TestResultsToEntries(results))
+				r.store.UpdateRunService(run.ID, svc.ServiceName, code, status, timestamp())
+				if status != "passed" {
 					allPassed = false
 				}
 			} else {
@@ -293,6 +288,50 @@ func (r *Runner) DetectOrphanedRuns() {
 			r.store.UpdateRunStatus(run.ID, "failed", timestamp())
 		}
 	}
+}
+
+// RunTargetedTest starts a targeted test run for a specific file, test name, or
+// pattern. It delegates to testrunner.RunTargetedTest for validation and run ID
+// generation.
+func (r *Runner) RunTargetedTest(service, target string, targetType testrunner.TargetType, suite string) (string, error) {
+	result, err := testrunner.RunTargetedTest(service, target, targetType, suite)
+	if err != nil {
+		return "", err
+	}
+	return result.ID, nil
+}
+
+// ComputeOverallStatus converts store.ResultEntry values to testrunner.TestResult
+// and delegates to testrunner.ComputeOverallStatus for pass/fail determination.
+func (r *Runner) ComputeOverallStatus(results []store.ResultEntry) (int, string) {
+	tResults := make([]testrunner.TestResult, len(results))
+	for i, e := range results {
+		tResults[i] = testrunner.TestResult{
+			Name:    e.Name,
+			Status:  e.Status,
+			Passed:  e.Passed,
+			Failed:  e.Failed,
+			Skipped: e.Skipped,
+			Total:   e.Total,
+		}
+	}
+	return testrunner.ComputeOverallStatus(tResults)
+}
+
+// CancelRun cancels an in-flight test run. It delegates to testrunner.CancelRun
+// for input validation and returns any validation error.
+func (r *Runner) CancelRun(runID string) error {
+	return testrunner.CancelRun(runID)
+}
+
+// MonitorScriptOutput waits for results.jsonl to appear in outputDir and returns
+// the parsed test results along with captured stdout and stderr.
+func (r *Runner) MonitorScriptOutput(ctx context.Context, outputDir string, timeout time.Duration) ([]store.ResultEntry, string, string, error) {
+	results, stdout, stderr, err := testrunner.MonitorScriptOutput(ctx, outputDir, timeout)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return store.TestResultsToEntries(results), stdout, stderr, nil
 }
 
 func (r *Runner) executeServices(ctx context.Context, runID string, suite string, services []string) {

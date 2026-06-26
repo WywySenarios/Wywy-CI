@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"wywy-website/ci/apps/testrunner"
 )
 
 func TestResolveScriptPath(t *testing.T) {
@@ -36,14 +38,14 @@ func TestResolveScriptPath(t *testing.T) {
 }
 
 func TestBuildScriptArgs(t *testing.T) {
-	inv := ScriptInvocation{
+	inv := testrunner.ScriptInvocation{
 		RunID:      "run-abc",
 		OutputDir:  "/tmp/runs/run-abc",
 		Machine:    true,
 		ExtraFlags: []string{"--verbose"},
 	}
 
-	args := BuildScriptArgs(inv)
+	args := testrunner.BuildScriptArgs(inv)
 
 	expected := []string{"--run-id=run-abc", "--output-dir=/tmp/runs/run-abc", "--machine", "--verbose"}
 	if len(args) != len(expected) {
@@ -125,7 +127,7 @@ printf '{"name":"alpha","status":"passed"}\n{"name":"beta","status":"failed"}\n'
 	defer cmd.Wait()
 	defer cmd.Process.Signal(syscall.SIGKILL)
 
-	results, stdout, stderr, err := MonitorScriptOutput(ctx, outputDir, 5*time.Second)
+	results, stdout, stderr, err := testrunner.MonitorScriptOutput(ctx, outputDir, 5*time.Second)
 	if err != nil {
 		t.Fatalf("MonitorScriptOutput: %v", err)
 	}
@@ -151,7 +153,7 @@ func TestMonitorScriptCompletionTimeout(t *testing.T) {
 	outputDir := t.TempDir()
 	ctx := context.Background()
 
-	_, _, _, err := MonitorScriptOutput(ctx, outputDir, 50*time.Millisecond)
+	_, _, _, err := testrunner.MonitorScriptOutput(ctx, outputDir, 50*time.Millisecond)
 	if err == nil {
 		t.Error("expected timeout error, got nil")
 	}
@@ -579,9 +581,9 @@ fi
 	defer cmd.Wait()
 	defer cmd.Process.Signal(syscall.SIGKILL)
 
-	_, _, _, err = MonitorScriptOutput(ctx, outputDir, 5*time.Second)
+	_, _, _, err = testrunner.MonitorScriptOutput(ctx, outputDir, 5*time.Second)
 	if err == nil {
-		t.Fatal("MonitorScriptOutput: expected error for malformed JSONL, got nil")
+		t.Fatal("testrunner.MonitorScriptOutput: expected error for malformed JSONL, got nil")
 	}
 	if err.Error() == "" {
 		t.Fatal("MonitorScriptOutput: returned empty error message")

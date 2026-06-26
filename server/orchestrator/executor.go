@@ -8,79 +8,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
-	"time"
 
-	"wywy-website/ci/server/store"
+	"wywy-website/ci/apps/testrunner"
 )
 
 // ServiceScriptResolver resolves script paths from service names.
-type ServiceScriptResolver struct {
-	services      map[string]string // service alias → repo name
-	reposBasePath string
-}
+// It is an alias for testrunner.ServiceScriptResolver.
+type ServiceScriptResolver = testrunner.ServiceScriptResolver
 
 // NewServiceScriptResolver creates a resolver with a service→repo mapping.
-func NewServiceScriptResolver(services map[string]string, reposBasePath string) *ServiceScriptResolver {
-	return &ServiceScriptResolver{services: services, reposBasePath: reposBasePath}
-}
-
-// ResolveScriptPath returns the path to a test script for the given service and suite.
-func (r *ServiceScriptResolver) ResolveScriptPath(service, suite string) (string, error) {
-	repo, ok := r.services[service]
-	if !ok {
-		return "", fmt.Errorf("unknown service: %s", service)
-	}
-	return fmt.Sprintf("%s/%s/scripts/tests/%s.sh", r.reposBasePath, repo, suite), nil
-}
-
-// ListSuites returns the available test suite names for a service by listing
-// *.sh files in the service's scripts/tests/ directory.
-func (r *ServiceScriptResolver) ListSuites(service string) ([]string, error) {
-	repo, ok := r.services[service]
-	if !ok {
-		return nil, fmt.Errorf("unknown service: %s", service)
-	}
-	pattern := filepath.Join(r.reposBasePath, repo, "scripts/tests", "*.sh")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("list suites for %s: %w", service, err)
-	}
-	// Deduplicate suite names (in case of multiple matches with the same base).
-	seen := make(map[string]bool)
-	var suites []string
-	for _, match := range matches {
-		base := filepath.Base(match)
-		suite := strings.TrimSuffix(base, ".sh")
-		if !seen[suite] {
-			seen[suite] = true
-			suites = append(suites, suite)
-		}
-	}
-	return suites, nil
-}
-
-// ScriptInvocation defines the parameters for invoking a test script.
-type ScriptInvocation struct {
-	RunID      string
-	OutputDir  string
-	Machine    bool
-	ExtraFlags []string
-}
-
-// BuildScriptArgs builds a CLI argument list from a ScriptInvocation.
-func BuildScriptArgs(inv ScriptInvocation) []string {
-	args := []string{
-		"--run-id=" + inv.RunID,
-		"--output-dir=" + inv.OutputDir,
-	}
-	if inv.Machine {
-		args = append(args, "--machine")
-	}
-	args = append(args, inv.ExtraFlags...)
-	return args
-}
+var NewServiceScriptResolver = testrunner.NewServiceScriptResolver
 
 // CommandRunner abstracts shell command execution for testability.
 type CommandRunner interface {
@@ -159,40 +97,6 @@ func (r *DetachedRunner) StartDetached(ctx context.Context, outputDir, name stri
 // Run executes the command synchronously in a new process group (satisfies CommandRunner).
 func (r *DetachedRunner) Run(ctx context.Context, name string, args ...string) (int, string, error) {
 	return runCmd(r.newCommand(ctx, name, args...))
-}
-
-// MonitorScriptOutput waits for results.jsonl to appear in outputDir and returns
-// the parsed results plus the contents of stdout.log and stderr.log.
-// It gives up and returns ctx.Err() after the given timeout.
-func MonitorScriptOutput(ctx context.Context, outputDir string, timeout time.Duration) ([]store.ResultEntry, string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	resultsPath := filepath.Join(outputDir, "results.jsonl")
-	stdoutPath := filepath.Join(outputDir, "stdout.log")
-	stderrPath := filepath.Join(outputDir, "stderr.log")
-
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, "", "", ctx.Err()
-		case <-ticker.C:
-			if _, err := os.Stat(resultsPath); err == nil {
-				results, err := store.ParseResultsJSONL(resultsPath)
-				if err != nil {
-					return nil, "", "", fmt.Errorf("parse results: %w", err)
-				}
-
-				stdout, _ := os.ReadFile(stdoutPath)
-				stderr, _ := os.ReadFile(stderrPath)
-
-				return results, string(stdout), string(stderr), nil
-			}
-		}
-	}
 }
 
 // Execute runs a test suite for a service, writing output to writer.

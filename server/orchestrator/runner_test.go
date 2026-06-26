@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"wywy-website/ci/apps/testrunner"
 	"wywy-website/ci/server/store"
 )
 
@@ -490,6 +491,182 @@ fi
 		for _, e := range logs {
 			t.Errorf("  [%s] %s", e.Level, e.Content)
 		}
+	}
+}
+
+// TestStartRunEmptyService verifies that StartRun rejects empty service names
+// by delegating to testrunner.RunTests for validation. When validServices is
+// nil (default NewRunner), StartRun must still catch an empty service name.
+func TestStartRunEmptyService(t *testing.T) {
+	s := newTestStore(t)
+	r := NewRunner(s, &fakeRunner{exitCode: 0})
+
+	ctx := context.Background()
+	_, err := r.StartRun(ctx, []string{""}, "test")
+	if err == nil {
+		t.Fatal("StartRun with empty service: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "service") {
+		t.Errorf("StartRun with empty service: error should mention 'service', got: %v", err)
+	}
+}
+
+// TestRunnerRunTargetedTest verifies that Runner.RunTargetedTest delegates to
+// testrunner.RunTargetedTest for validation and run ID generation.
+func TestRunnerRunTargetedTest(t *testing.T) {
+	s := newTestStore(t)
+	r := NewRunner(s, &fakeRunner{exitCode: 0})
+
+	// Valid inputs — must delegate to testrunner and return a run ID.
+	id, err := r.RunTargetedTest("agentic", "test_auth.go", testrunner.TargetFile, "test")
+	if err != nil {
+		t.Fatalf("RunTargetedTest(agentic, test_auth.go, file, test): %v", err)
+	}
+	if id == "" {
+		t.Error("RunTargetedTest: expected non-empty run ID")
+	}
+
+	// Empty service — testrunner validation must reject it.
+	_, err = r.RunTargetedTest("", "test_auth.go", testrunner.TargetFile, "test")
+	if err == nil {
+		t.Error("RunTargetedTest with empty service: expected error, got nil")
+	}
+
+	// Empty target — testrunner validation must reject it.
+	_, err = r.RunTargetedTest("agentic", "", testrunner.TargetFile, "test")
+	if err == nil {
+		t.Error("RunTargetedTest with empty target: expected error, got nil")
+	}
+}
+
+// TestRunnerComputeOverallStatus verifies that Runner.ComputeOverallStatus
+// delegates to testrunner to determine pass/fail from a set of results.
+func TestRunnerComputeOverallStatus(t *testing.T) {
+	s := newTestStore(t)
+	r := NewRunner(s, &fakeRunner{exitCode: 0})
+
+	// All passed — must return (0, "passed").
+	code, status := r.ComputeOverallStatus([]store.ResultEntry{
+		{Name: "t1", Status: "passed"},
+		{Name: "t2", Status: "passed"},
+	})
+	if code != 0 {
+		t.Errorf("all passed: want exit code 0, got %d", code)
+	}
+	if status != "passed" {
+		t.Errorf("all passed: want status 'passed', got %q", status)
+	}
+
+	// Any failed — must return (1, "failed").
+	code, status = r.ComputeOverallStatus([]store.ResultEntry{
+		{Name: "t1", Status: "passed"},
+		{Name: "t2", Status: "failed"},
+	})
+	if code != 1 {
+		t.Errorf("any failed: want exit code 1, got %d", code)
+	}
+	if status != "failed" {
+		t.Errorf("any failed: want status 'failed', got %q", status)
+	}
+
+	// Empty results — must return (0, "passed").
+	code, status = r.ComputeOverallStatus(nil)
+	if code != 0 {
+		t.Errorf("empty: want exit code 0, got %d", code)
+	}
+	if status != "passed" {
+		t.Errorf("empty: want status 'passed', got %q", status)
+	}
+}
+
+// TestRunnerMonitorScriptOutput verifies that Runner.MonitorScriptOutput
+// monitors a directory for results.jsonl, parses the test results, and
+// returns them along with captured stdout and stderr from log files.
+func TestRunnerMonitorScriptOutput(t *testing.T) {
+	outputDir := t.TempDir()
+
+	// Write results.jsonl, stdout.log, and stderr.log before calling so the
+	// monitor finds them on the first poll tick.
+	resultsContent := `{"name":"alpha","status":"passed","passed":1,"failed":0,"skipped":0,"total":1}
+{"name":"beta","status":"failed","passed":0,"failed":1,"skipped":0,"total":1}`
+	if err := os.WriteFile(filepath.Join(outputDir, "results.jsonl"), []byte(resultsContent+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "stdout.log"), []byte("line from stdout\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "stderr.log"), []byte("line from stderr\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{}
+	ctx := context.Background()
+
+	results, stdout, stderr, err := r.MonitorScriptOutput(ctx, outputDir, 5*time.Second)
+	if err != nil {
+		t.Fatalf("MonitorScriptOutput: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Name != "alpha" || results[0].Status != "passed" {
+		t.Errorf("result[0]: want Name=alpha Status=passed, got Name=%s Status=%s", results[0].Name, results[0].Status)
+	}
+	if results[1].Name != "beta" || results[1].Status != "failed" {
+		t.Errorf("result[1]: want Name=beta Status=failed, got Name=%s Status=%s", results[1].Name, results[1].Status)
+	}
+	if stdout != "line from stdout\n" {
+		t.Errorf("stdout: want %q, got %q", "line from stdout\n", stdout)
+	}
+	if stderr != "line from stderr\n" {
+		t.Errorf("stderr: want %q, got %q", "line from stderr\n", stderr)
+	}
+}
+
+// TestParseResultsJSONL verifies that testrunner exports a ParseResultsJSONL
+// function so the orchestrator can parse results.jsonl files without importing
+// the store package (e.g., from DetectOrphanedRuns).
+func TestParseResultsJSONL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "results.jsonl")
+	content := `{"name":"alpha","status":"passed","passed":1,"failed":0,"skipped":0,"total":1}
+{"name":"beta","status":"failed","passed":0,"failed":1,"skipped":0,"total":1}`
+	if err := os.WriteFile(path, []byte(content+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := testrunner.ParseResultsJSONL(path)
+	if err != nil {
+		t.Fatalf("ParseResultsJSONL: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Name != "alpha" || results[0].Status != "passed" {
+		t.Errorf("result[0]: want Name=alpha Status=passed, got Name=%s Status=%s", results[0].Name, results[0].Status)
+	}
+	if results[1].Name != "beta" || results[1].Status != "failed" {
+		t.Errorf("result[1]: want Name=beta Status=failed, got Name=%s Status=%s", results[1].Name, results[1].Status)
+	}
+}
+
+// TestRunnerCancelRun verifies that Runner.CancelRun delegates to
+// testrunner.CancelRun for validation. A valid run ID returns nil;
+// an empty run ID returns an error.
+func TestRunnerCancelRun(t *testing.T) {
+	s := newTestStore(t)
+	r := NewRunner(s, &fakeRunner{exitCode: 0})
+
+	// Valid run ID — must delegate to testrunner and return nil.
+	err := r.CancelRun("run-valid-id")
+	if err != nil {
+		t.Fatalf("CancelRun('run-valid-id'): %v", err)
+	}
+
+	// Empty run ID — testrunner validation must reject it.
+	err = r.CancelRun("")
+	if err == nil {
+		t.Error("CancelRun(''): expected error for empty run ID, got nil")
 	}
 }
 
