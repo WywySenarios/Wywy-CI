@@ -133,6 +133,9 @@ type runDetailResponse struct {
 	CreatedAt  string             `json:"created_at"`
 	FinishedAt string             `json:"finished_at,omitempty"`
 	Status     string             `json:"status"`
+	Passed     int                `json:"passed"`
+	Failed     int                `json:"failed"`
+	Skipped    int                `json:"skipped"`
 	Services   []store.RunService `json:"services"`
 }
 
@@ -160,6 +163,9 @@ func (h *Handler) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:  run.CreatedAt,
 		FinishedAt: run.FinishedAt,
 		Status:     run.Status,
+		Passed:     run.Passed,
+		Failed:     run.Failed,
+		Skipped:    run.Skipped,
 		Services:   toSlice(services),
 	})
 }

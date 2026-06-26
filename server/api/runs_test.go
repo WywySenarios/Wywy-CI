@@ -719,6 +719,73 @@ func TestCreateRunEmitsFullLifecycleEvents(t *testing.T) {
 	}
 }
 
+// TestGetRunReturnsAggregatedCounts verifies that GET /api/runs/{id} includes
+// aggregated count fields (passed, failed, skipped) at the run level.
+// Counts are summed from the run's services and appear alongside the services array.
+func TestGetRunReturnsAggregatedCounts(t *testing.T) {
+	s := newTestStore(t)
+	createRunWithTwoServices(t, s, "r-aggr")
+	srv := newTestServer(t, s, nil, nil)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/runs/r-aggr")
+	if err != nil {
+		t.Fatalf("GET /api/runs/r-aggr: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	// Run-level aggregated counts should be passed=8, failed=3, skipped=1.
+	assertAggregatedCounts(t, result, 8, 3, 1)
+
+	// Per-service counts should still be present in the services array.
+	services, ok := result["services"].([]any)
+	if !ok {
+		t.Fatal("response missing 'services' array")
+	}
+	if len(services) != 2 {
+		t.Fatalf("services: want 2, got %d", len(services))
+	}
+}
+
+// TestListRunsReturnsAggregatedCounts verifies that GET /api/runs includes
+// aggregated count fields (passed, failed, skipped) on each run object.
+func TestListRunsReturnsAggregatedCounts(t *testing.T) {
+	s := newTestStore(t)
+	createRunWithTwoServices(t, s, "r-list")
+	srv := newTestServer(t, s, nil, nil)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/runs")
+	if err != nil {
+		t.Fatalf("GET /api/runs: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", resp.StatusCode)
+	}
+
+	var result []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("want 1 run, got %d", len(result))
+	}
+
+	// Run-level aggregated counts should be passed=8, failed=3, skipped=1.
+	assertAggregatedCounts(t, result[0], 8, 3, 1)
+}
+
 // newTestServer creates an httptest.Server with the given store and runner.
 func newTestServer(t *testing.T, st *store.Store, runner *orchestrator.Runner, validServices map[string]bool) *httptest.Server {
 	t.Helper()
@@ -726,6 +793,51 @@ func newTestServer(t *testing.T, st *store.Store, runner *orchestrator.Runner, v
 	h := &Handler{Store: st, Runner: runner, ValidServices: validServices}
 	h.RegisterRoutes(mux)
 	return httptest.NewServer(mux)
+}
+
+// createRunWithTwoServices creates a run with two services whose counts sum
+// to passed=8, failed=3, skipped=1.
+func createRunWithTwoServices(t *testing.T, s *store.Store, runID string) {
+	t.Helper()
+	run := &store.Run{ID: runID, CreatedAt: "2026-06-01T00:00:00Z", Status: "passed"}
+	if err := s.CreateRun(run); err != nil {
+		t.Fatalf("CreateRun(%q): %v", runID, err)
+	}
+	if err := s.CreateRunService(&store.RunService{
+		RunID: runID, ServiceName: "agentic", Suite: "test",
+		Status: "passed", Passed: 5, Failed: 2, Skipped: 1,
+	}); err != nil {
+		t.Fatalf("CreateRunService(%q/agentic): %v", runID, err)
+	}
+	if err := s.CreateRunService(&store.RunService{
+		RunID: runID, ServiceName: "ci", Suite: "test",
+		Status: "failed", Passed: 3, Failed: 1, Skipped: 0,
+	}); err != nil {
+		t.Fatalf("CreateRunService(%q/ci): %v", runID, err)
+	}
+}
+
+// assertAggregatedCounts checks that data contains the expected passed/failed/skipped
+// keys and values, as decoded from JSON (float64 for numeric fields).
+func assertAggregatedCounts(t *testing.T, data map[string]any, wantPassed, wantFailed, wantSkipped int) {
+	t.Helper()
+	for _, key := range []string{"passed", "failed", "skipped"} {
+		if _, ok := data[key]; !ok {
+			t.Errorf("response missing aggregated %q", key)
+		}
+	}
+	gotPassed, _ := data["passed"].(float64)
+	gotFailed, _ := data["failed"].(float64)
+	gotSkipped, _ := data["skipped"].(float64)
+	if gotPassed != float64(wantPassed) {
+		t.Errorf("passed: want %d, got %v", wantPassed, gotPassed)
+	}
+	if gotFailed != float64(wantFailed) {
+		t.Errorf("failed: want %d, got %v", wantFailed, gotFailed)
+	}
+	if gotSkipped != float64(wantSkipped) {
+		t.Errorf("skipped: want %d, got %v", wantSkipped, gotSkipped)
+	}
 }
 
 // buildServiceRepoMap reads services.txt (name,repo format) and returns a
