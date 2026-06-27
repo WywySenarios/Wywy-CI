@@ -26,6 +26,15 @@ func (r *ServiceScriptResolver) ResolveScriptPath(service, suite string) (string
 	return fmt.Sprintf("%s/%s/scripts/tests/%s.sh", r.reposBasePath, repo, suite), nil
 }
 
+// ListServices returns all registered service names.
+func (r *ServiceScriptResolver) ListServices() []string {
+	var names []string
+	for name := range r.services {
+		names = append(names, name)
+	}
+	return names
+}
+
 // ListSuites returns the available test suite names for a service by listing
 // *.sh files in the service's scripts/tests/ directory.
 func (r *ServiceScriptResolver) ListSuites(service string) ([]string, error) {

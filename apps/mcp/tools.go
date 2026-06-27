@@ -3,58 +3,23 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"wywy-ci/apps/testrunner"
+	"wywy-ci/internal/config"
 )
 
-const (
-	reposBasePath       = "/usr/local/Wywy-Website"
-	defaultServicesPath = "/etc/Wywy-Website-Control/services.txt"
-)
+// configLoaderFn is a test-only override for loading config.
+// When nil, handlers return an error.
+var configLoaderFn func() (*config.Config, error)
 
-// serviceConfig represents a single entry from services.txt.
-type serviceConfig struct {
-	Alias string
-	Repo  string
+// SetConfigLoader sets a config loader function, used for testing.
+// Pass nil to clear the loader (handlers will return an error).
+func SetConfigLoader(fn func() (*config.Config, error)) {
+	configLoaderFn = fn
 }
-
-// loadServices reads services.txt and returns the parsed entries.
-// It respects the CI_SERVICES_PATH environment variable override.
-func loadServices() ([]serviceConfig, error) {
-	path := defaultServicesPath
-	if env := os.Getenv("CI_SERVICES_PATH"); env != "" {
-		path = env
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var services []serviceConfig
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ",", 2)
-		cfg := serviceConfig{Alias: parts[0]}
-		if len(parts) > 1 {
-			cfg.Repo = parts[1]
-		}
-		services = append(services, cfg)
-	}
-	return services, nil
-}
-
-// loadServicesCached returns the cached services config, loading it once on
-// the first call. The config file does not change at runtime.
-var loadServicesCached = sync.OnceValues(func() ([]serviceConfig, error) {
-	return loadServices()
-})
 
 // parseArgs returns the arguments map from a tool request, or an error result
 // if the arguments are missing or not a map.
@@ -96,19 +61,23 @@ func parseRunIDArg(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
 	return runID, nil
 }
 
-// findService looks up a service by alias from the cached services config.
-// It returns false if the service is not found or if loading the config fails.
-func findService(alias string) (serviceConfig, bool) {
-	services, err := loadServicesCached()
-	if err != nil {
-		return serviceConfig{}, false
+// findService looks up a service by alias from the config loader.
+// It returns the repo path and true if found, or empty string and false if
+// no config is loaded or the service is not found.
+func findService(alias string) (string, bool) {
+	if configLoaderFn == nil {
+		return "", false
 	}
-	for _, svc := range services {
-		if svc.Alias == alias {
-			return svc, true
+	cfg, err := configLoaderFn()
+	if err != nil {
+		return "", false
+	}
+	for _, r := range cfg.Repos {
+		if r.Name == alias {
+			return r.Path, true
 		}
 	}
-	return serviceConfig{}, false
+	return "", false
 }
 
 // textResult marshals v to JSON and returns a successful CallToolResult with
@@ -135,9 +104,12 @@ func runResultResponse(result *testrunner.RunResult) (*mcp.CallToolResult, error
 // HandleListServices returns all CI services with their repos and available
 // test suites as a JSON array of {name, repo, suites} objects.
 func HandleListServices(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	services, err := loadServicesCached()
+	if configLoaderFn == nil {
+		return mcp.NewToolResultError("no config loaded"), nil
+	}
+	cfg, err := configLoaderFn()
 	if err != nil {
-		return mcp.NewToolResultError("failed to load services: " + err.Error()), nil
+		return mcp.NewToolResultError("failed to load config: " + err.Error()), nil
 	}
 
 	type entry struct {
@@ -147,14 +119,14 @@ func HandleListServices(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 	}
 
 	var result []entry
-	for _, svc := range services {
-		suites, _ := testrunner.ListTestSuites(reposBasePath, svc.Repo)
+	for _, r := range cfg.Repos {
+		suites, _ := testrunner.ListTestSuites("", r.Path)
 		if suites == nil {
 			suites = []string{}
 		}
 		result = append(result, entry{
-			Name:   svc.Alias,
-			Repo:   svc.Repo,
+			Name:   r.Name,
+			Repo:   r.Path,
 			Suites: suites,
 		})
 	}
@@ -170,12 +142,12 @@ func HandleListTestFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		return errResult, nil
 	}
 
-	svc, ok := findService(service)
+	repoPath, ok := findService(service)
 	if !ok {
 		return mcp.NewToolResultError("unknown service: " + service), nil
 	}
 
-	pattern := filepath.Join(reposBasePath, svc.Repo, "scripts/tests", "*.sh")
+	pattern := filepath.Join(repoPath, "scripts/tests", "*.sh")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return mcp.NewToolResultError("failed to list test files: " + err.Error()), nil
@@ -208,12 +180,12 @@ func HandleListTestSuites(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		return errResult, nil
 	}
 
-	svc, ok := findService(service)
+	repoPath, ok := findService(service)
 	if !ok {
 		return mcp.NewToolResultError("unknown service: " + service), nil
 	}
 
-	suites, err := testrunner.ListTestSuites(reposBasePath, svc.Repo)
+	suites, err := testrunner.ListTestSuites("", repoPath)
 	if err != nil {
 		return mcp.NewToolResultError("failed to list suites: " + err.Error()), nil
 	}

@@ -6,9 +6,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 
 	"wywy-ci/apps/mcp"
+	"wywy-ci/internal/config"
 	"wywy-ci/server/api"
 	"wywy-ci/server/orchestrator"
 	"wywy-ci/server/store"
@@ -27,13 +27,25 @@ func main() {
 	}
 	defer st.Close()
 
-	// Load valid services from services.txt (optional).
-	servicesPath := os.Getenv("CI_SERVICES_PATH")
-	if servicesPath == "" {
-		servicesPath = "/etc/Wywy-Website-Control/services.txt"
+	// Load config from .wywy-ci files (home + project, layered).
+	homeConfig := os.Getenv("HOME") + "/.wywy-ci"
+	projectConfig := ".wywy-ci"
+
+	cfg, resolver, err := loadConfigOrDie(homeConfig, projectConfig)
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
 	}
 
-	validServices, serviceRepoMap := loadServices(servicesPath)
+	// Set up config loader for MCP tools.
+	mcp.SetConfigLoader(func() (*config.Config, error) {
+		return cfg, nil
+	})
+
+	// Build set of valid service names from config.
+	validServices := make(map[string]bool)
+	for _, repo := range resolver.ListServices() {
+		validServices[repo] = true
+	}
 
 	// Create broadcasters, runner, and handler.
 	broadcaster := api.NewBroadcaster()
@@ -42,17 +54,12 @@ func main() {
 	runner.SetBroadcaster(broadcaster)
 	runner.SetEventBroadcaster(api.NewEventBroadcasterAdapter(eventBroadcaster))
 	runner.RunsDir = "/var/lib/Wywy-Website/ci/runs"
-	if serviceRepoMap != nil {
-		runner.SetResolver(orchestrator.NewServiceScriptResolver(
-			serviceRepoMap, "/usr/local/Wywy-Website",
-		))
-	}
+	runner.SetResolver(resolver)
 
 	handler := &api.Handler{
 		Store:            st,
 		Runner:           runner,
 		ValidServices:    validServices,
-		ServicesPath:     servicesPath,
 		Broadcaster:      broadcaster,
 		EventBroadcaster: eventBroadcaster,
 	}
@@ -92,27 +99,19 @@ func openStore(path string) (*store.Store, error) {
 	return store.Open(path)
 }
 
-// loadServices reads the services.txt file (name,repo format) and returns
-// a set of valid service names and a map of service name → repo name.
-// If the file cannot be read, both return values are nil (skip validation).
-func loadServices(path string) (map[string]bool, map[string]string) {
-	data, err := os.ReadFile(path)
+// loadConfigOrDie loads config from .wywy-ci files and constructs a resolver.
+func loadConfigOrDie(paths ...string) (*config.Config, *orchestrator.ServiceScriptResolver, error) {
+	cfg, err := config.Load(paths...)
 	if err != nil {
-		return nil, nil
+		return nil, nil, err
 	}
 
-	services := make(map[string]bool)
-	repos := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ",", 2)
-		name := parts[0]
-		services[name] = true
-		if len(parts) > 1 {
-			repos[name] = parts[1]
-		}
+	services := make(map[string]string)
+	for _, r := range cfg.Repos {
+		services[r.Name] = r.Path
 	}
-	return services, repos
+
+	return cfg, orchestrator.NewServiceScriptResolver(services, ""), nil
 }
+
+

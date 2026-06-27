@@ -3,6 +3,9 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -10,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	wywy "wywy-ci/apps/mcp"
+	"wywy-ci/internal/config"
 )
 
 // toolClient is satisfied by the client returned from mcptest.Server.Client().
@@ -45,6 +49,27 @@ func getTextContent(t *testing.T, result *mcp.CallToolResult) string {
 }
 
 func TestListServicesTool_ReturnsServices(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDir := filepath.Join(tmpDir, "scripts", "tests")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testDir, "unit.sh"), []byte("echo test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testDir, "integration.sh"), []byte("echo test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "myapp", Path: tmpDir},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
 	tool := mcp.NewTool("list_services",
 		mcp.WithDescription("Lists all available CI services with their repos and test suites"),
 	)
@@ -68,12 +93,33 @@ func TestListServicesTool_ReturnsServices(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &services); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
-	if len(services) == 0 {
-		t.Fatal("expected at least one service")
+	if len(services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(services))
+	}
+	if services[0].Name != "myapp" {
+		t.Errorf("expected service name 'myapp', got %q", services[0].Name)
 	}
 }
 
 func TestListTestFilesTool_ReturnsTestFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDir := filepath.Join(tmpDir, "scripts", "tests")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testDir, "unit.sh"), []byte("echo test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "myapp", Path: tmpDir},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
 	tool := mcp.NewTool("list_test_files",
 		mcp.WithDescription("Lists test files for a given service and optional suite"),
 		mcp.WithString("service", mcp.Required(), mcp.Description("Service name")),
@@ -88,7 +134,7 @@ func TestListTestFilesTool_ReturnsTestFiles(t *testing.T) {
 	}
 	defer s.Close()
 
-	result := callToolSuccess(t, s.Client(), "list_test_files", map[string]any{"service": "ci"})
+	result := callToolSuccess(t, s.Client(), "list_test_files", map[string]any{"service": "myapp"})
 	text := getTextContent(t, result)
 
 	var files []struct {
@@ -98,12 +144,37 @@ func TestListTestFilesTool_ReturnsTestFiles(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &files); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
-	if len(files) == 0 {
-		t.Fatal("expected at least one test file")
+	if len(files) != 1 {
+		t.Fatalf("expected 1 test file, got %d", len(files))
+	}
+	expectedPath := filepath.Join(tmpDir, "scripts", "tests", "unit.sh")
+	if files[0].Path != expectedPath {
+		t.Errorf("expected path %q, got %q", expectedPath, files[0].Path)
+	}
+	if files[0].Suite != "unit" {
+		t.Errorf("expected suite 'unit', got %q", files[0].Suite)
 	}
 }
 
 func TestListTestSuitesTool_ReturnsTestSuites(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDir := filepath.Join(tmpDir, "scripts", "tests")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testDir, "unit.sh"), []byte("echo test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "myapp", Path: tmpDir},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
 	tool := mcp.NewTool("list_test_suites",
 		mcp.WithDescription("Lists test suites for a given service"),
 		mcp.WithString("service", mcp.Required(), mcp.Description("Service name")),
@@ -117,7 +188,7 @@ func TestListTestSuitesTool_ReturnsTestSuites(t *testing.T) {
 	}
 	defer s.Close()
 
-	result := callToolSuccess(t, s.Client(), "list_test_suites", map[string]any{"service": "ci"})
+	result := callToolSuccess(t, s.Client(), "list_test_suites", map[string]any{"service": "myapp"})
 	text := getTextContent(t, result)
 
 	var suites []struct {
@@ -127,12 +198,27 @@ func TestListTestSuitesTool_ReturnsTestSuites(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &suites); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
-	if len(suites) == 0 {
-		t.Fatal("expected at least one suite")
+	if len(suites) != 1 {
+		t.Fatalf("expected 1 suite, got %d", len(suites))
+	}
+	if suites[0].Name != "unit" {
+		t.Errorf("expected suite name 'unit', got %q", suites[0].Name)
+	}
+	if suites[0].Framework != "shell" {
+		t.Errorf("expected framework 'shell', got %q", suites[0].Framework)
 	}
 }
 
 func TestRunTestsTool_StartsRun(t *testing.T) {
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "ci", Path: t.TempDir()},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
 	tool := mcp.NewTool("run_tests",
 		mcp.WithDescription("Runs all tests for a service, optionally scoped to a suite"),
 		mcp.WithString("service", mcp.Required(), mcp.Description("Service name")),
@@ -166,6 +252,15 @@ func TestRunTestsTool_StartsRun(t *testing.T) {
 }
 
 func TestRunTargetedTestTool_StartsRun(t *testing.T) {
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "ci", Path: t.TempDir()},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
 	tool := mcp.NewTool("run_targeted_test",
 		mcp.WithDescription("Runs a targeted test by file path, test name, or pattern"),
 		mcp.WithString("service", mcp.Required(), mcp.Description("Service name")),
@@ -302,5 +397,111 @@ func TestGetRunResultsTool_ReturnsRunResults(t *testing.T) {
 	}
 	if results.Status == "" {
 		t.Fatal("expected non-empty status")
+	}
+}
+
+func TestListServicesTool_ReturnsServicesFromConfig(t *testing.T) {
+	// Override config loader to return known repos.
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "myapp", Path: "/tmp/myapp"},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
+	tool := mcp.NewTool("list_services",
+		mcp.WithDescription("Lists all available CI services with their repos and test suites"),
+	)
+	s, err := mcptest.NewServer(t, server.ServerTool{
+		Tool:    tool,
+		Handler: wywy.HandleListServices,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	result := callToolSuccess(t, s.Client(), "list_services", nil)
+	text := getTextContent(t, result)
+
+	var services []struct {
+		Name   string   `json:"name"`
+		Repo   string   `json:"repo"`
+		Suites []string `json:"suites"`
+	}
+	if err := json.Unmarshal([]byte(text), &services); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+
+	// The handler should return exactly the repo from config,
+	// using the full Path from the config entry.
+	if len(services) != 1 {
+		t.Fatalf("expected 1 service from config, got %d", len(services))
+	}
+	if services[0].Name != "myapp" {
+		t.Errorf("expected service name 'myapp', got %q", services[0].Name)
+	}
+	if services[0].Repo != "/tmp/myapp" {
+		t.Errorf("expected repo '/tmp/myapp', got %q", services[0].Repo)
+	}
+}
+
+func TestListTestFilesTool_ResolvesFullPathFromConfig(t *testing.T) {
+	// Create a temp directory with test scripts.
+	tmpDir := t.TempDir()
+	testDir := filepath.Join(tmpDir, "scripts", "tests")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testDir, "unit.sh"), []byte("echo test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override config loader with the temp dir as the repo path.
+	wywy.SetConfigLoader(func() (*config.Config, error) {
+		return &config.Config{
+			Repos: []config.RepoEntry{
+				{Name: "myapp", Path: tmpDir},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { wywy.SetConfigLoader(nil) })
+
+	tool := mcp.NewTool("list_test_files",
+		mcp.WithDescription("Lists test files for a given service and optional suite"),
+		mcp.WithString("service", mcp.Required(), mcp.Description("Service name")),
+		mcp.WithString("suite", mcp.Description("Optional suite name")),
+	)
+	s, err := mcptest.NewServer(t, server.ServerTool{
+		Tool:    tool,
+		Handler: wywy.HandleListTestFiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	result := callToolSuccess(t, s.Client(), "list_test_files", map[string]any{"service": "myapp"})
+	text := getTextContent(t, result)
+
+	var files []struct {
+		Path  string `json:"path"`
+		Suite string `json:"suite"`
+	}
+	if err := json.Unmarshal([]byte(text), &files); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+
+	// The returned paths should use the full config path, not reposBasePath + repoDir.
+	if len(files) != 1 {
+		t.Fatalf("expected 1 test file, got %d", len(files))
+	}
+	if !strings.HasPrefix(files[0].Path, tmpDir) {
+		t.Errorf("expected path to start with config path %q, got %q", tmpDir, files[0].Path)
+	}
+	if files[0].Suite != "unit" {
+		t.Errorf("expected suite 'unit', got %q", files[0].Suite)
 	}
 }
