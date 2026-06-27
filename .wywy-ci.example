@@ -1,0 +1,10 @@
+{
+  "repos": [
+    {"name": "ci", "path": "/usr/local/Wywy-Website/Wywy-CI"},
+    {"name": "cache", "path": "/usr/local/Wywy-Website/Wywy-Website-Cache"},
+    {"name": "website", "path": "/usr/local/Wywy-Website/Wywy-Website"},
+    {"name": "agentic", "path": "/usr/local/Wywy-Website/Wywy-Codes"},
+    {"name": "backup", "path": "/usr/local/Wywy-Website/Wywy-Website-Backup"},
+    {"name": "master-database", "path": "/usr/local/Wywy-Website/Wywy-Website-Master-Database"}
+  ]
+}

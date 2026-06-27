@@ -21,4 +21,5 @@ Thumbs.db
 *.db-wal
 *.db-shm
 
-
+# configuration
+.wywy-ci
